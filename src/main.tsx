@@ -1,7 +1,17 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { invoke } from '@tauri-apps/api/core';
 import './styles.css';
+declare global {
+  interface Window {
+    mail2telegram: {
+      invoke: <T = unknown>(command: string, args?: unknown) => Promise<T>;
+    };
+  }
+}
+
+const invoke = <T = unknown>(command: string, args?: unknown) =>
+  window.mail2telegram.invoke<T>(command, args);
+
 
 type Post={id:string;title:string;content:string;source?:string;status:string;created_at?:string};
 type Email={id:string;sender?:string;subject?:string;received_at?:string;status:string};
