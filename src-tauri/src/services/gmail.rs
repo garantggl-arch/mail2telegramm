@@ -29,7 +29,7 @@ pub fn oauth_and_connect(path: &Path) -> Result<String, String> {
     use std::io::Write; let _=stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>Mail2Telegram: Gmail connected. You can close this tab.</h2>");
     if let Some(e)=err { return Err(format!("Google OAuth: {e}")); }
     let code = code.ok_or("Не получен OAuth code")?;
-    let rt = runtime_tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(exchange_and_profile(path, &client_id, &client_secret, &redirect, &code))
 }
 
