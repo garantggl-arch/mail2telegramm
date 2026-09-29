@@ -26,7 +26,7 @@ pub fn oauth_and_connect(path: &Path) -> Result<String, String> {
     let query = line.split_whitespace().nth(1).unwrap_or("/").split('?').nth(1).unwrap_or("");
     let mut code = None; let mut err = None;
     for p in query.split('&') { let mut it=p.splitn(2,'='); let k=it.next().unwrap_or(""); let v=it.next().unwrap_or(""); if k=="code" { code=Some(v.to_string()); } if k=="error" { err=Some(v.to_string()); } }
-    use std::io::Write; let _=stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>Mail2Telegram: Gmail подключён. Можно закрыть вкладку.</h2>");
+    use std::io::Write; let _=stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>Mail2Telegram: Gmail connected. You can close this tab.</h2>");
     if let Some(e)=err { return Err(format!("Google OAuth: {e}")); }
     let code = code.ok_or("Не получен OAuth code")?;
     let rt = runtime_tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
