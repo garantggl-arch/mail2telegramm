@@ -1,5 +1,9 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
+
+ipcMain.handle("app_status", async () => {
+  return "Локальное ядро Electron запущено";
+});
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -18,6 +22,8 @@ webPreferences: {
 
   win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
 }
+
+
 
 app.whenReady().then(() => {
   createWindow();
