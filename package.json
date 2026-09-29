@@ -29,11 +29,15 @@
   "directories": {
     "output": "release"
   },
-  "files": [
-    "dist/**/*",
-    "electron/**/*",
-    "package.json"
-  ],
+"files": [
+  "dist/**/*",
+  "electron/main.cjs",
+  "electron/preload.cjs",
+  "package.json"
+],
+  "extraMetadata": {
+  "main": "electron/main.cjs"
+},
   "win": {
     "target": [
       "nsis"
