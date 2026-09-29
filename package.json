@@ -23,31 +23,33 @@
     "typescript": "5.4.5",
     "vite": "4.5.14"
   },
-"build": {
-  "publish": null,
-  "appId": "com.mail2telegram.desktop",
-  "productName": "Mail2Telegram",
-  "directories": {
-    "output": "release"
-  },
-"files": [
-  "dist/**/*",
-  "electron/main.cjs",
-  "electron/preload.cjs",
-  "package.json"
-],
-  "extraMetadata": {
-  "main": "electron/main.cjs"
-},
-  "win": {
-    "target": [
-      "portable"
+  "build": {
+    "publish": null,
+    "appId": "com.mail2telegram.desktop",
+    "productName": "Mail2Telegram",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/main.cjs",
+      "electron/preload.cjs",
+      "package.json"
     ],
-    "icon": "src-tauri/icons/icon.ico"
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "src-tauri/icons/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
-  "nsis": {
-    "oneClick": false,
-    "allowToChangeInstallationDirectory": true
-  }
-}
+  "description": "Mail2Telegram desktop application",
+  "author": "Mail2Telegram"
 }
