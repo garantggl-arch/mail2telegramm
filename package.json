@@ -22,5 +22,27 @@
     "electron-builder": "24.13.3",
     "typescript": "5.4.5",
     "vite": "4.5.14"
+  },
+"build": {
+  "appId": "com.mail2telegram.desktop",
+  "productName": "Mail2Telegram",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": [
+      "nsis"
+    ],
+    "icon": "src-tauri/icons/icon.ico"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
   }
+}
 }
