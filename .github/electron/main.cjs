@@ -9,10 +9,11 @@ function createWindow() {
     minHeight: 620,
     resizable: true,
     title: "Mail2Telegram",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false
-    }
+webPreferences: {
+  contextIsolation: true,
+  nodeIntegration: false,
+  preload: path.join(__dirname, "preload.cjs")
+}
   });
 
   win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
