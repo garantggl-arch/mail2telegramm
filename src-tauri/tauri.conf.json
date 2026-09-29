@@ -32,6 +32,9 @@
       "msi",
       "dmg"
     ],
+    "icon": [
+    "icons/icon.ico"
+    ],
     "category": "Productivity",
     "shortDescription": "Turn emails into Telegram posts",
     "longDescription": "Desktop automation for turning Gmail messages into AI-assisted Telegram posts."
