@@ -21,3 +21,6 @@ Desktop-приложение для Windows 7: Gmail OAuth → получени�
 
 ## Windows 7
 Сборка использует Electron 22 и portable EXE без WebView2.
+
+
+Win7 fix: electron-builder explicitly copies node_modules/electron/dist/ffmpeg.dll to the application root to prevent the missing ffmpeg.dll startup error.
