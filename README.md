@@ -4,7 +4,7 @@ Desktop-приложение для Windows 7: Gmail OAuth → получени�
 
 ## AI без OpenAI API
 
-Для генерации постов используется **Google Gemini API**, а не OpenAI API. Для `gemini-2.5-flash-lite` Google указывает бесплатный уровень для стандартного текстового использования; действующие лимиты зависят от аккаунта и тарифа Google.
+Для генерации постов используется **Google Gemini API**, а не OpenAI API. Для `gemini-3.8-flash` Google указывает Free Tier для этой модели; фактические лимиты зависят от доступности Free Tier для аккаунта и текущих квот Google.
 
 Ключ можно создать в Google AI Studio: https://aistudio.google.com/apikey
 
