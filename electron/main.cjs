@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const net = require('net');
+const tls = require('tls');
 const crypto = require('crypto');
 
 let mainWindow = null;
@@ -15,7 +17,7 @@ const state = {
 
 function defaultData() {
   return {
-    settings: { intervalMinutes: 5, autostart: true, background: true, telegramChatId: '' },
+    settings: { intervalMinutes: 5, autostart: true, background: true, telegramChatId: '', proxyEnabled: true, proxyHost: '', proxyPort: 3128, proxyUser: '', proxyPassword: '' },
     secrets: {},
     gmail: { email: '', refreshToken: '' },
     emails: [],
@@ -56,26 +58,105 @@ function requestJson(url, options = {}, body = null) {
     const data = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
     const headers = { ...(options.headers || {}) };
     if (data && !headers['Content-Length']) headers['Content-Length'] = Buffer.byteLength(data);
-    const req = https.request({
-      hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search,
-      method: options.method || 'GET', headers
-    }, res => {
-      let raw = '';
-      res.setEncoding('utf8');
-      res.on('data', c => raw += c);
-      res.on('end', () => {
-        let parsed;
-        try { parsed = raw ? JSON.parse(raw) : {}; } catch (_) { parsed = { raw }; }
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
-        else reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 1200)}`));
+    const d = loadData();
+    const proxy = d.settings && d.settings.proxyEnabled && d.settings.proxyHost ? {
+      host: String(d.settings.proxyHost).trim(),
+      port: Number(d.settings.proxyPort || 3128),
+      user: String(d.settings.proxyUser || ''),
+      password: String(d.settings.proxyPassword || '')
+    } : null;
+
+    if (!proxy) {
+      const req = https.request({
+        hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search,
+        method: options.method || 'GET', headers
+      }, res => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', c => raw += c);
+        res.on('end', () => {
+          let parsed;
+          try { parsed = raw ? JSON.parse(raw) : {}; } catch (_) { parsed = { raw }; }
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+          else reject(new Error(`HTTP ${res.statusCode}: ${raw.slice(0, 1200)}`));
+        });
       });
+      req.on('error', reject);
+      if (data) req.write(data);
+      req.end();
+      return;
+    }
+
+    const proxySocket = net.connect(proxy.port, proxy.host);
+    let settled = false;
+    const fail = err => { if (!settled) { settled = true; try { proxySocket.destroy(); } catch (_) {} reject(err); } };
+    proxySocket.setTimeout(30000, () => fail(new Error(`Прокси: тайм-аут подключения к ${proxy.host}:${proxy.port}`)));
+    proxySocket.once('error', fail);
+    proxySocket.once('connect', () => {
+      let connectHeaders = `CONNECT ${u.hostname}:${u.port || 443} HTTP/1.1\r\nHost: ${u.hostname}:${u.port || 443}\r\nProxy-Connection: Keep-Alive\r\n`;
+      if (proxy.user) {
+        const auth = Buffer.from(`${proxy.user}:${proxy.password}`).toString('base64');
+        connectHeaders += `Proxy-Authorization: Basic ${auth}\r\n`;
+      }
+      connectHeaders += '\r\n';
+      proxySocket.write(connectHeaders);
     });
-    req.on('error', reject);
-    if (data) req.write(data);
-    req.end();
+
+    let connectBuffer = Buffer.alloc(0);
+    const onConnectData = chunk => {
+      connectBuffer = Buffer.concat([connectBuffer, chunk]);
+      const marker = connectBuffer.indexOf('\r\n\r\n');
+      if (marker === -1) return;
+      proxySocket.removeListener('data', onConnectData);
+      const head = connectBuffer.slice(0, marker).toString('latin1');
+      const statusLine = head.split('\r\n')[0] || '';
+      const match = statusLine.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i);
+      const status = match ? Number(match[1]) : 0;
+      if (status !== 200) {
+        fail(new Error(`Прокси CONNECT: ${statusLine || 'неизвестный ответ'}`));
+        return;
+      }
+      const leftover = connectBuffer.slice(marker + 4);
+      const secure = tls.connect({ socket: proxySocket, servername: u.hostname, rejectUnauthorized: options.rejectUnauthorized !== false });
+      secure.setTimeout(30000, () => { try { secure.destroy(new Error('HTTPS через прокси: тайм-аут')); } catch (_) {} });
+      secure.once('error', fail);
+      secure.once('secureConnect', () => {
+        const requestPath = u.pathname + u.search;
+        let request = `${options.method || 'GET'} ${requestPath} HTTP/1.1\r\nHost: ${u.hostname}${u.port && u.port !== '443' ? ':' + u.port : ''}\r\nConnection: close\r\n`;
+        for (const [k, v] of Object.entries(headers)) request += `${k}: ${v}\r\n`;
+        request += '\r\n';
+        if (data) request += data;
+        secure.write(request);
+        if (leftover.length) secure.unshift(leftover);
+        let raw = '';
+        let headerDone = false;
+        let bodyText = '';
+        secure.on('data', chunk => {
+          raw += chunk.toString('utf8');
+          if (!headerDone) {
+            const idx = raw.indexOf('\r\n\r\n');
+            if (idx !== -1) { headerDone = true; bodyText = raw.slice(idx + 4); }
+          } else bodyText += chunk.toString('utf8');
+        });
+        secure.on('end', () => {
+          if (settled) return;
+          settled = true;
+          const idx = raw.indexOf('\r\n\r\n');
+          const head = idx >= 0 ? raw.slice(0, idx) : raw;
+          const body = idx >= 0 ? raw.slice(idx + 4) : '';
+          const first = head.split('\r\n')[0] || '';
+          const m = first.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i);
+          const code = m ? Number(m[1]) : 0;
+          let parsed;
+          try { parsed = body ? JSON.parse(body) : {}; } catch (_) { parsed = { raw: body }; }
+          if (code >= 200 && code < 300) resolve(parsed);
+          else reject(new Error(`HTTP ${code}: ${body.slice(0, 1200)}`));
+        });
+      });
+    };
+    proxySocket.on('data', onConnectData);
   });
 }
-
 function requestText(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -298,6 +379,11 @@ ipcMain.handle('save_settings', async (_event, input = {}) => {
   if (input.intervalMinutes) d.settings.intervalMinutes = Math.max(1, Number(input.intervalMinutes));
   if (typeof input.autostart === 'boolean') d.settings.autostart = input.autostart;
   if (typeof input.background === 'boolean') d.settings.background = input.background;
+  if (typeof input.proxyEnabled === 'boolean') d.settings.proxyEnabled = input.proxyEnabled;
+  if (input.proxyHost !== undefined) d.settings.proxyHost = String(input.proxyHost || '').trim();
+  if (input.proxyPort !== undefined) d.settings.proxyPort = Math.max(1, Number(input.proxyPort || 3128));
+  if (input.proxyUser !== undefined) d.settings.proxyUser = String(input.proxyUser || '');
+  if (input.proxyPassword !== undefined) d.settings.proxyPassword = String(input.proxyPassword || '');
   saveData(d); startPolling(); return true;
 });
 
