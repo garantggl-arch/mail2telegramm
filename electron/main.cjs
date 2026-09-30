@@ -492,6 +492,29 @@ ipcMain.handle('save_credentials', async (_event, input = {}) => {
 ipcMain.handle('connect_gmail', async () => connectGmail());
 ipcMain.handle('test_telegram', async () => testTelegram());
 ipcMain.handle('sync_now', async () => syncAndProcess());
+ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
+  const d = loadData();
+  const email = d.emails.find(e => e.id === args.emailId);
+  if (!email) throw new Error('Письмо не найдено');
+  const existing = d.posts.find(p => p.email_id === email.id);
+  if (existing) return existing.id;
+  const automation = d.automations.find(a => a.enabled !== false && matchesAutomation(a, email.sender || '', email.subject || '', email.body_text || email.body_html || ''));
+  const prompt = automation ? automation.prompt : '';
+  const body = email.body_text || email.body_html || '';
+  const made = await makePost(d, email.subject || '', email.sender || '', body, prompt);
+  const post = {
+    id: crypto.randomUUID(),
+    email_id: email.id,
+    title: made.title,
+    content: made.content,
+    status: 'draft',
+    source: email.sender || 'Gmail',
+    created_at: new Date().toISOString()
+  };
+  d.posts.unshift(post);
+  saveData(d);
+  return post.id;
+});
 ipcMain.handle('publish_post', async (_event, args = {}) => {
   const d = loadData(); const post = d.posts.find(p => p.id === args.postId);
   if (!post) throw new Error('Пост не найден');
