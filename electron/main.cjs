@@ -347,15 +347,33 @@ function configState(d) {
 
 ipcMain.handle('app_status', async () => 'Локальное ядро Electron запущено');
 ipcMain.handle('get_config_state', async () => configState(loadData()));
+ipcMain.handle('get_settings', async () => {
+  const d = loadData();
+  return {
+    clientId: getSecret(d, 'google_client_id'),
+    hasClientSecret: !!getSecret(d, 'google_client_secret'),
+    hasOpenaiApiKey: !!getSecret(d, 'openai_api_key'),
+    hasTelegramBotToken: !!getSecret(d, 'telegram_bot_token'),
+    telegramChatId: d.settings.telegramChatId || '',
+    proxyEnabled: !!d.settings.proxyEnabled,
+    proxyHost: d.settings.proxyHost || '',
+    proxyPort: Number(d.settings.proxyPort || 3128),
+    proxyUser: d.settings.proxyUser || '',
+    hasProxyPassword: !!d.settings.proxyPassword,
+    intervalMinutes: Number(d.settings.intervalMinutes || 5)
+  };
+});
 ipcMain.handle('list_emails', async () => loadData().emails.slice(0, 100));
 ipcMain.handle('list_posts', async () => loadData().posts.slice(0, 100));
 ipcMain.handle('save_credentials', async (_event, input = {}) => {
   const d = loadData();
-  setSecret(d, 'google_client_id', input.clientId || '');
-  setSecret(d, 'google_client_secret', input.clientSecret || '');
-  setSecret(d, 'openai_api_key', input.openaiApiKey || '');
-  setSecret(d, 'telegram_bot_token', input.telegramBotToken || '');
-  d.settings.telegramChatId = input.telegramChatId || d.settings.telegramChatId || '';
+  // Empty fields mean 'leave the saved value unchanged'. This prevents the UI
+  // from wiping credentials when it is opened or when only one setting changes.
+  if (input.clientId) setSecret(d, 'google_client_id', String(input.clientId).trim());
+  if (input.clientSecret) setSecret(d, 'google_client_secret', String(input.clientSecret));
+  if (input.openaiApiKey) setSecret(d, 'openai_api_key', String(input.openaiApiKey).trim());
+  if (input.telegramBotToken) setSecret(d, 'telegram_bot_token', String(input.telegramBotToken).trim());
+  if (input.telegramChatId !== undefined && String(input.telegramChatId).trim()) d.settings.telegramChatId = String(input.telegramChatId).trim();
   saveData(d); return true;
 });
 ipcMain.handle('connect_gmail', async () => connectGmail());
@@ -383,7 +401,7 @@ ipcMain.handle('save_settings', async (_event, input = {}) => {
   if (input.proxyHost !== undefined) d.settings.proxyHost = String(input.proxyHost || '').trim();
   if (input.proxyPort !== undefined) d.settings.proxyPort = Math.max(1, Number(input.proxyPort || 3128));
   if (input.proxyUser !== undefined) d.settings.proxyUser = String(input.proxyUser || '');
-  if (input.proxyPassword !== undefined) d.settings.proxyPassword = String(input.proxyPassword || '');
+  if (input.proxyPassword !== undefined && String(input.proxyPassword || '')) d.settings.proxyPassword = String(input.proxyPassword);
   saveData(d); startPolling(); return true;
 });
 
