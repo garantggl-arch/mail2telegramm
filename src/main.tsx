@@ -117,3 +117,5 @@ function Settings({config,onSaved}:{config:Config;onSaved:()=>void}){
  </section>
 }
 
+
+createRoot(document.getElementById('root')!).render(<App/>);
