@@ -6,6 +6,7 @@ const https = require('https');
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 let mainWindow = null;
 let pollTimer = null;
@@ -52,6 +53,54 @@ function decryptSecret(value) {
 function getSecret(d, key) { return d.secrets[key] ? decryptSecret(d.secrets[key]) : ''; }
 function setSecret(d, key, value) { d.secrets[key] = encryptSecret(value || ''); }
 
+function decodeHttpBody(bodyBuffer, headers) {
+  let body = Buffer.from(bodyBuffer || '');
+  const transferEncoding = String(headers['transfer-encoding'] || '').toLowerCase();
+  if (transferEncoding.includes('chunked')) {
+    const chunks = [];
+    let offset = 0;
+    while (offset < body.length) {
+      const lineEnd = body.indexOf('\r\n', offset);
+      if (lineEnd < 0) break;
+      const sizeText = body.slice(offset, lineEnd).toString('ascii').split(';', 1)[0].trim();
+      const size = parseInt(sizeText, 16);
+      if (!Number.isFinite(size) || size < 0) break;
+      offset = lineEnd + 2;
+      if (size === 0) break;
+      if (offset + size > body.length) break;
+      chunks.push(body.slice(offset, offset + size));
+      offset += size + 2;
+    }
+    body = Buffer.concat(chunks);
+  }
+
+  const encoding = String(headers['content-encoding'] || '').toLowerCase();
+  try {
+    if (encoding.includes('gzip')) body = zlib.gunzipSync(body);
+    else if (encoding.includes('deflate')) body = zlib.inflateSync(body);
+    else if (encoding.includes('br')) body = zlib.brotliDecompressSync(body);
+  } catch (_) {
+    // If decompression fails, keep the original bytes so the caller gets a useful error.
+  }
+  return body.toString('utf8');
+}
+
+function parseHttpResponse(buffer) {
+  const marker = buffer.indexOf(Buffer.from('\r\n\r\n'));
+  if (marker < 0) return { code: 0, headers: {}, body: buffer.toString('utf8') };
+  const head = buffer.slice(0, marker).toString('latin1');
+  const bodyBuffer = buffer.slice(marker + 4);
+  const lines = head.split('\r\n');
+  const first = lines.shift() || '';
+  const match = first.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i);
+  const headers = {};
+  for (const line of lines) {
+    const i = line.indexOf(':');
+    if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+  }
+  return { code: match ? Number(match[1]) : 0, headers, body: decodeHttpBody(bodyBuffer, headers) };
+}
+
 function requestJson(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -71,10 +120,10 @@ function requestJson(url, options = {}, body = null) {
         hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search,
         method: options.method || 'GET', headers
       }, res => {
-        let raw = '';
-        res.setEncoding('utf8');
-        res.on('data', c => raw += c);
+        const chunks = [];
+        res.on('data', c => chunks.push(Buffer.from(c)));
         res.on('end', () => {
+          const raw = decodeHttpBody(Buffer.concat(chunks), Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(',') : String(v || '')])));
           let parsed;
           try { parsed = raw ? JSON.parse(raw) : {}; } catch (_) { parsed = { raw }; }
           if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
@@ -105,7 +154,7 @@ function requestJson(url, options = {}, body = null) {
     let connectBuffer = Buffer.alloc(0);
     const onConnectData = chunk => {
       connectBuffer = Buffer.concat([connectBuffer, chunk]);
-      const marker = connectBuffer.indexOf('\r\n\r\n');
+      const marker = connectBuffer.indexOf(Buffer.from('\r\n\r\n'));
       if (marker === -1) return;
       proxySocket.removeListener('data', onConnectData);
       const head = connectBuffer.slice(0, marker).toString('latin1');
@@ -127,30 +176,17 @@ function requestJson(url, options = {}, body = null) {
         request += '\r\n';
         if (data) request += data;
         secure.write(request);
-        if (leftover.length) secure.unshift(leftover);
-        let raw = '';
-        let headerDone = false;
-        let bodyText = '';
-        secure.on('data', chunk => {
-          raw += chunk.toString('utf8');
-          if (!headerDone) {
-            const idx = raw.indexOf('\r\n\r\n');
-            if (idx !== -1) { headerDone = true; bodyText = raw.slice(idx + 4); }
-          } else bodyText += chunk.toString('utf8');
-        });
+
+        let responseBuffer = leftover.length ? Buffer.from(leftover) : Buffer.alloc(0);
+        secure.on('data', chunk => { responseBuffer = Buffer.concat([responseBuffer, Buffer.from(chunk)]); });
         secure.on('end', () => {
           if (settled) return;
           settled = true;
-          const idx = raw.indexOf('\r\n\r\n');
-          const head = idx >= 0 ? raw.slice(0, idx) : raw;
-          const body = idx >= 0 ? raw.slice(idx + 4) : '';
-          const first = head.split('\r\n')[0] || '';
-          const m = first.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i);
-          const code = m ? Number(m[1]) : 0;
+          const parsedResponse = parseHttpResponse(responseBuffer);
           let parsed;
-          try { parsed = body ? JSON.parse(body) : {}; } catch (_) { parsed = { raw: body }; }
-          if (code >= 200 && code < 300) resolve(parsed);
-          else reject(new Error(`HTTP ${code}: ${body.slice(0, 1200)}`));
+          try { parsed = parsedResponse.body ? JSON.parse(parsedResponse.body) : {}; } catch (_) { parsed = { raw: parsedResponse.body }; }
+          if (parsedResponse.code >= 200 && parsedResponse.code < 300) resolve(parsed);
+          else reject(new Error(`HTTP ${parsedResponse.code}: ${parsedResponse.body.slice(0, 1200)}`));
         });
       });
     };
