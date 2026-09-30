@@ -380,21 +380,36 @@ async function syncGmail(d) {
 }
 
 async function makePost(d, subject, sender, body, customPrompt) {
-  const key = getSecret(d, 'openai_api_key');
-  if (!key) throw new Error('OpenAI API key не задан.');
-  const prompt = customPrompt && customPrompt.trim() ? customPrompt : 'Сделай короткий пост для Telegram на русском языке по содержимому письма. Не выдумывай факты. Верни JSON: {"title":"...","content":"..."}. Заголовок до 100 символов, текст до 3500 символов.';
+  const key = getSecret(d, 'gemini_api_key');
+  if (!key) throw new Error('Google Gemini API key не задан. Получите ключ в Google AI Studio и сохраните его в Settings.');
+  const prompt = customPrompt && customPrompt.trim() ? customPrompt : 'Сделай короткий пост для Telegram на русском языке по содержимому письма. Не выдумывай факты. Верни только JSON без markdown: {"title":"...","content":"..."}. Заголовок до 100 символов, текст до 3500 символов.';
   const input = `${prompt}\n\nОтправитель: ${sender}\nТема: ${subject}\n\nПисьмо:\n${body}`;
-  const v = await requestJson('https://api.openai.com/v1/responses', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' } }, { model: 'gpt-5.6-luna', input, max_output_tokens: 1200 });
-  let text = v.output_text;
-  if (!text && Array.isArray(v.output)) {
-    for (const item of v.output) for (const c of item.content || []) if (c.text) { text = c.text; break; }
-  }
-  if (!text) throw new Error(`OpenAI: не найден текст ответа: ${JSON.stringify(v).slice(0, 1500)}`);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${encodeURIComponent(key)}`;
+  const v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
+    contents: [{ role: 'user', parts: [{ text: input }] }],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1200 }
+  });
+  const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('') || '';
+  if (!text) throw new Error(`Gemini: не найден текст ответа: ${JSON.stringify(v).slice(0, 1500)}`);
   const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
   try {
     const o = JSON.parse(cleaned);
     return { title: o.title || subject || 'Без заголовка', content: o.content || cleaned };
   } catch (_) { return { title: subject || 'Без заголовка', content: cleaned }; }
+}
+
+async function testGemini() {
+  const d = loadData();
+  const key = getSecret(d, 'gemini_api_key');
+  if (!key) throw new Error('Google Gemini API key не задан.');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${encodeURIComponent(key)}`;
+  const v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
+    contents: [{ role: 'user', parts: [{ text: 'Ответь одним словом: OK' }] }],
+    generationConfig: { maxOutputTokens: 10 }
+  });
+  const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('').trim() || '';
+  if (!text) throw new Error(`Gemini не вернул ответ: ${JSON.stringify(v).slice(0, 1000)}`);
+  return 'Gemini подключён';
 }
 
 function matchesAutomation(a, sender, subject, body) {
@@ -455,7 +470,7 @@ async function syncAndProcess() {
 }
 
 function configState(d) {
-  return { gmail: !!d.gmail.email && !!getSecret(d, 'google_refresh_token'), openai: !!getSecret(d, 'openai_api_key'), telegram: !!getSecret(d, 'telegram_bot_token') && !!d.settings.telegramChatId };
+  return { gmail: !!d.gmail.email && !!getSecret(d, 'google_refresh_token'), gemini: !!getSecret(d, 'gemini_api_key'), telegram: !!getSecret(d, 'telegram_bot_token') && !!d.settings.telegramChatId };
 }
 
 ipcMain.handle('app_status', async () => 'Локальное ядро Electron запущено');
@@ -465,7 +480,7 @@ ipcMain.handle('get_settings', async () => {
   return {
     clientId: getSecret(d, 'google_client_id'),
     hasClientSecret: !!getSecret(d, 'google_client_secret'),
-    hasOpenaiApiKey: !!getSecret(d, 'openai_api_key'),
+    hasGeminiApiKey: !!getSecret(d, 'gemini_api_key'),
     hasTelegramBotToken: !!getSecret(d, 'telegram_bot_token'),
     telegramChatId: d.settings.telegramChatId || '',
     proxyEnabled: !!d.settings.proxyEnabled,
@@ -484,13 +499,14 @@ ipcMain.handle('save_credentials', async (_event, input = {}) => {
   // from wiping credentials when it is opened or when only one setting changes.
   if (input.clientId) setSecret(d, 'google_client_id', String(input.clientId).trim());
   if (input.clientSecret) setSecret(d, 'google_client_secret', String(input.clientSecret));
-  if (input.openaiApiKey) setSecret(d, 'openai_api_key', String(input.openaiApiKey).trim());
+  if (input.geminiApiKey) setSecret(d, 'gemini_api_key', String(input.geminiApiKey).trim());
   if (input.telegramBotToken) setSecret(d, 'telegram_bot_token', String(input.telegramBotToken).trim());
   if (input.telegramChatId !== undefined && String(input.telegramChatId).trim()) d.settings.telegramChatId = String(input.telegramChatId).trim();
   saveData(d); return true;
 });
 ipcMain.handle('connect_gmail', async () => connectGmail());
 ipcMain.handle('test_telegram', async () => testTelegram());
+ipcMain.handle('test_gemini', async () => testGemini());
 ipcMain.handle('sync_now', async () => syncAndProcess());
 ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
   const d = loadData();

@@ -1,35 +1,23 @@
-# Mail2Telegram 0.2.0
+# Mail2Telegram 0.2.0 — Gemini edition
 
-Рабочий desktop MVP для Windows/macOS: Gmail OAuth → локальная SQLite → фильтры → OpenAI Responses API → черновик или автоматическая публикация в Telegram.
+Desktop-приложение для Windows 7: Gmail OAuth → получение писем → Google Gemini → черновик поста → Telegram.
 
-## 1. Что нужно
-- Node.js 20+
-- Rust stable + Visual Studio Build Tools (Windows) или Xcode Command Line Tools (macOS)
-- Google Cloud project с Gmail API и OAuth Client ID типа **Desktop app**
-- OpenAI API key
-- Telegram bot token и канал/чат, куда бот может писать
+## AI без OpenAI API
 
-## 2. Запуск
-```bash
-npm install
-npm run tauri dev
-```
+Для генерации постов используется **Google Gemini API**, а не OpenAI API. Для `gemini-2.5-flash-lite` Google указывает бесплатный уровень для стандартного текстового использования; действующие лимиты зависят от аккаунта и тарифа Google.
 
-## 3. Настройка
-1. Settings → сохраните Google Client ID/Secret, OpenAI key, Telegram Bot Token и Chat ID.
-2. Нажмите «Подключить Gmail». Откроется браузер Google OAuth; после согласия вкладку можно закрыть.
-3. Нажмите «Проверить Telegram».
-4. В Automation создайте правило. В режиме Approval новые письма превращаются в черновики. В Automatic они публикуются сразу.
-5. Нажмите «Синхронизировать» для первого запуска. Дальше фоновый цикл проверяет почту автоматически.
+Ключ можно создать в Google AI Studio: https://aistudio.google.com/apikey
 
-## 4. Windows build
-```powershell
-npm install
-npm run tauri build
-```
-Установщики:
-- `src-tauri/target/release/bundle/nsis/` — EXE installer
-- `src-tauri/target/release/bundle/msi/` — MSI
+## Настройка
+1. Settings → сохраните Google OAuth Client ID/Secret.
+2. Нажмите «Подключить Gmail».
+3. Создайте Gemini API key в Google AI Studio и сохраните его в поле «Google Gemini API Key».
+4. Нажмите «Проверить Gemini».
+5. Сохраните Telegram Bot Token и Chat ID / @channel.
+6. В Emails нажмите «Создать пост» у нужного письма.
+7. В Posts проверьте черновик и нажмите «Опубликовать в Telegram».
 
-## Важно
-Gmail использует OAuth desktop flow с loopback redirect. Для Google Cloud нужен OAuth consent screen и включённый Gmail API. Токены и API keys хранятся через системное credential storage, а не в SQLite.
+Прокси используется для HTTPS-соединений, включая Gmail, Gemini и Telegram.
+
+## Windows 7
+Сборка использует Electron 22 и portable EXE без WebView2.

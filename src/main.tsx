@@ -16,11 +16,11 @@ const invoke = <T = unknown>(command: string, args?: unknown) =>
 type Post={id:string;title:string;content:string;source?:string;status:string;created_at?:string};
 type Email={id:string;sender?:string;subject?:string;received_at?:string;status:string};
 
-type Config={gmail:boolean;openai:boolean;telegram:boolean};
+type Config={gmail:boolean;gemini:boolean;telegram:boolean};
 
 function App(){
  const [page,setPage]=React.useState('dashboard'); const [status,setStatus]=React.useState('Запуск…');
- const [posts,setPosts]=React.useState<Post[]>([]); const [emails,setEmails]=React.useState<Email[]>([]); const [config,setConfig]=React.useState<Config>({gmail:false,openai:false,telegram:false});
+ const [posts,setPosts]=React.useState<Post[]>([]); const [emails,setEmails]=React.useState<Email[]>([]); const [config,setConfig]=React.useState<Config>({gmail:false,gemini:false,telegram:false});
  const [busy,setBusy]=React.useState(false); const [notice,setNotice]=React.useState('');
  const refresh=async()=>{try{setPosts(await invoke<Post[]>('list_posts'));setEmails(await invoke<Email[]>('list_emails'));setConfig(await invoke<Config>('get_config_state'));setStatus('Мониторинг активен')}catch(e){setStatus(String(e))}};
  React.useEffect(()=>{invoke<string>('app_status').then(setStatus).catch(e=>setStatus(String(e)));refresh()},[]);
@@ -31,7 +31,7 @@ function App(){
  {page==='dashboard'&&<Dashboard posts={posts} config={config} publish={publish} sync={sync}/>} {page==='posts'&&<Posts posts={posts} publish={publish}/>} {page==='emails'&&<Emails emails={emails} busy={busy} onCreated={async(msg)=>{setNotice(msg);await refresh()}}/>} {page==='automation'&&<Automation onSaved={setNotice}/>} {page==='settings'&&<Settings config={config} onSaved={async()=>{await refresh();setNotice('Настройки сохранены')}}/>}
  </main></div>
 }
-function Dashboard({posts,config,publish,sync}:{posts:Post[];config:Config;publish:(id:string)=>void;sync:()=>void}){return <><section className="stats"><Stat n={String(posts.length)} t="Постов создано"/><Stat n={String(posts.filter(p=>p.status==='published').length)} t="Опубликовано"/><Stat n={String(posts.filter(p=>p.status==='draft').length)} t="На проверке"/><Stat n={config.gmail&&config.openai&&config.telegram?'OK':'!'} t="Конфигурация"/></section><section className="section"><div className="sectionTitle"><h2>Требуют проверки</h2><span className="badge">Approval mode</span></div>{posts.filter(p=>p.status==='draft').slice(0,5).map(p=><PostCard key={p.id} post={p} publish={publish}/>)}{posts.filter(p=>p.status==='draft').length===0&&<div className="empty"><h2>Черновиков нет</h2><p>Подключите сервисы и нажмите «Синхронизировать».</p></div>}</section><section className="section"><div className="sectionTitle"><h2>Подключения</h2></div><div className="connections"><Connection title="Gmail" ok={config.gmail} desc="OAuth-доступ к входящим письмам"/><Connection title="OpenAI" ok={config.openai} desc="Генерация заголовка и текста поста"/><Connection title="Telegram" ok={config.telegram} desc="Публикация в указанный канал"/></div></section></>}
+function Dashboard({posts,config,publish,sync}:{posts:Post[];config:Config;publish:(id:string)=>void;sync:()=>void}){return <><section className="stats"><Stat n={String(posts.length)} t="Постов создано"/><Stat n={String(posts.filter(p=>p.status==='published').length)} t="Опубликовано"/><Stat n={String(posts.filter(p=>p.status==='draft').length)} t="На проверке"/><Stat n={config.gmail&&config.gemini&&config.telegram?'OK':'!'} t="Конфигурация"/></section><section className="section"><div className="sectionTitle"><h2>Требуют проверки</h2><span className="badge">Approval mode</span></div>{posts.filter(p=>p.status==='draft').slice(0,5).map(p=><PostCard key={p.id} post={p} publish={publish}/>)}{posts.filter(p=>p.status==='draft').length===0&&<div className="empty"><h2>Черновиков нет</h2><p>Подключите сервисы и нажмите «Синхронизировать».</p></div>}</section><section className="section"><div className="sectionTitle"><h2>Подключения</h2></div><div className="connections"><Connection title="Gmail" ok={config.gmail} desc="OAuth-доступ к входящим письмам"/><Connection title="Gemini" ok={config.gemini} desc="Бесплатная генерация заголовка и текста поста"/><Connection title="Telegram" ok={config.telegram} desc="Публикация в указанный канал"/></div></section></>}
 function Posts({posts,publish}:{posts:Post[];publish:(id:string)=>void}){return <section className="section">{posts.map(p=><PostCard key={p.id} post={p} publish={publish}/>)}{!posts.length&&<div className="empty"><h2>Постов пока нет</h2></div>}</section>}
 function PostCard({post,publish}:{post:Post;publish:(id:string)=>void}){return <article className="card post"><div className="postTop"><span className={'status '+post.status}>{post.status==='draft'?'Черновик':post.status==='published'?'Опубликован':'В очереди'}</span><span className="muted">{post.source||'Gmail'}</span></div><h3>{post.title||'Без заголовка'}</h3><p>{post.content}</p><div className="actions">{post.status==='draft'&&<button className="primary" onClick={()=>publish(post.id)}>Опубликовать в Telegram</button>}</div></article>}
 function Stat({n,t}:{n:string;t:string}){return <div className="card stat"><strong>{n}</strong><span>{t}</span></div>}
@@ -44,7 +44,7 @@ function Automation({onSaved}:{onSaved:(s:string)=>void}){const [name,setName]=R
 function Settings({config,onSaved}:{config:Config;onSaved:()=>void}){
  const [cid,setCid]=React.useState('');
  const [secret,setSecret]=React.useState('');
- const [openai,setOpenai]=React.useState('');
+ const [gemini,setGemini]=React.useState('');
  const [token,setToken]=React.useState('');
  const [chat,setChat]=React.useState('');
  const [proxyEnabled,setProxyEnabled]=React.useState(true);
@@ -54,7 +54,7 @@ function Settings({config,onSaved}:{config:Config;onSaved:()=>void}){
  const [proxyPassword,setProxyPassword]=React.useState('');
  const [interval,setIntervalValue]=React.useState('5');
  const [loaded,setLoaded]=React.useState(false);
- const [savedFlags,setSavedFlags]=React.useState({secret:false,openai:false,token:false,proxyPassword:false});
+ const [savedFlags,setSavedFlags]=React.useState({secret:false,gemini:false,token:false,proxyPassword:false});
 
  React.useEffect(()=>{
    (async()=>{
@@ -67,7 +67,7 @@ function Settings({config,onSaved}:{config:Config;onSaved:()=>void}){
        setProxyPort(String(s.proxyPort||3128));
        setProxyUser(s.proxyUser||'');
        setIntervalValue(String(s.intervalMinutes||5));
-       setSavedFlags({secret:!!s.hasClientSecret,openai:!!s.hasOpenaiApiKey,token:!!s.hasTelegramBotToken,proxyPassword:!!s.hasProxyPassword});
+       setSavedFlags({secret:!!s.hasClientSecret,gemini:!!s.hasGeminiApiKey,token:!!s.hasTelegramBotToken,proxyPassword:!!s.hasProxyPassword});
      }catch(e){ console.error(e); }
      finally{ setLoaded(true); }
    })();
@@ -75,10 +75,10 @@ function Settings({config,onSaved}:{config:Config;onSaved:()=>void}){
 
  const save=async()=>{
    try{
-     await invoke('save_credentials',{clientId:cid,clientSecret:secret,openaiApiKey:openai,telegramBotToken:token,telegramChatId:chat});
+     await invoke('save_credentials',{clientId:cid,clientSecret:secret,geminiApiKey:gemini,telegramBotToken:token,telegramChatId:chat});
      await invoke('save_settings',{proxyEnabled,proxyHost,proxyPort:Number(proxyPort),proxyUser,proxyPassword,intervalMinutes:Number(interval)});
-     setSavedFlags(x=>({secret:x.secret||!!secret,openai:x.openai||!!openai,token:x.token||!!token,proxyPassword:x.proxyPassword||!!proxyPassword}));
-     setSecret(''); setOpenai(''); setToken(''); setProxyPassword('');
+     setSavedFlags(x=>({secret:x.secret||!!secret,gemini:x.gemini||!!gemini,token:x.token||!!token,proxyPassword:x.proxyPassword||!!proxyPassword}));
+     setSecret(''); setGemini(''); setToken(''); setProxyPassword('');
      onSaved();
    }catch(e){ alert(String(e)); }
  };
@@ -97,14 +97,14 @@ function Settings({config,onSaved}:{config:Config;onSaved:()=>void}){
      <label>Google OAuth Client Secret<input type="password" value={secret} onChange={e=>setSecret(e.target.value)} placeholder={savedFlags.secret?'Сохранён — введите новый, только если хотите заменить':''}/></label>
      <div className="actions"><button className="secondary" onClick={save}>Сохранить ключи</button><button className="primary" onClick={gmail}>Подключить Gmail</button></div>
      <hr/>
-     <label>OpenAI API key<input type="password" value={openai} onChange={e=>setOpenai(e.target.value)} placeholder={savedFlags.openai?'Сохранён — введите новый, только если хотите заменить':'sk-…'}/></label>
+     <label>Google Gemini API Key<input type="password" value={gemini} onChange={e=>setGemini(e.target.value)} placeholder={savedFlags.gemini?'Сохранён — введите новый, только если хотите заменить':'AIza…'}/></label><div className="actions"><button className="secondary" onClick={async()=>{try{await invoke('test_gemini');alert('Gemini: подключён')}catch(e){alert(String(e))}}}>Проверить Gemini</button></div>
      <label>Telegram Bot Token<input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder={savedFlags.token?'Сохранён — введите новый, только если хотите заменить':'123456:ABC…'}/></label>
      <label>Telegram Chat ID / @channel<input value={chat} onChange={e=>setChat(e.target.value)} placeholder="@my_channel или -100…"/></label>
      <div className="actions"><button className="secondary" onClick={save}>Сохранить</button><button className="secondary" onClick={tg}>Проверить Telegram</button></div>
-     <div className="connectionGrid"><span>Gmail: {config.gmail?'✓':'—'}</span><span>OpenAI: {config.openai?'✓':'—'}</span><span>Telegram: {config.telegram?'✓':'—'}</span></div>
+     <div className="connectionGrid"><span>Gmail: {config.gmail?'✓':'—'}</span><span>Gemini: {config.gemini?'✓':'—'}</span><span>Telegram: {config.telegram?'✓':'—'}</span></div>
    </div>
    <div className="card form">
-     <h2>Прокси</h2><p className="muted">Используется для HTTPS-соединений Mail2Telegram, включая Telegram, Gmail и OpenAI.</p>
+     <h2>Прокси</h2><p className="muted">Используется для HTTPS-соединений Mail2Telegram, включая Telegram, Gmail и Gemini.</p>
      <label className="check"><input type="checkbox" checked={proxyEnabled} onChange={e=>setProxyEnabled(e.target.checked)}/> Использовать прокси</label>
      <label>Адрес прокси<input value={proxyHost} onChange={e=>setProxyHost(e.target.value)} placeholder="proxy.example.ru"/></label>
      <label>Порт<input value={proxyPort} onChange={e=>setProxyPort(e.target.value)} placeholder="3128"/></label>
