@@ -200,18 +200,38 @@ async function gmailAccessToken(d) {
   return token.access_token;
 }
 
-async function connectGmail() {
-  const d = loadData();
-  const clientId = getSecret(d, 'google_client_id');
-  const clientSecret = getSecret(d, 'google_client_secret');
-  if (!clientId) throw new Error('Сначала сохраните Google OAuth Client ID.');
-  if (!clientSecret) throw new Error('Сначала сохраните Google OAuth Client Secret.');
+async function revokeGoogleToken(token) {
+  if (!token) return;
+  try {
+    await requestJson('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }, new URLSearchParams({ token }).toString());
+  } catch (_) {
+    // Revocation is best-effort. The next authorization attempt will still
+    // request a fresh offline grant with explicit consent.
+  }
+}
 
+function randomBase64Url(bytes = 32) {
+  return crypto.randomBytes(bytes).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function sha256Base64Url(value) {
+  return crypto.createHash('sha256').update(value).digest('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function runGoogleOAuth(clientId, clientSecret) {
   const server = http.createServer();
   await new Promise((resolve, reject) => server.listen(0, '127.0.0.1', resolve).on('error', reject));
   const port = server.address().port;
   const redirect = `http://127.0.0.1:${port}`;
   const scope = 'https://www.googleapis.com/auth/gmail.readonly';
+  const state = randomBase64Url(24);
+  const codeVerifier = randomBase64Url(48);
+  const codeChallenge = sha256Base64Url(codeVerifier);
   const auth = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   auth.searchParams.set('client_id', clientId);
   auth.searchParams.set('redirect_uri', redirect);
@@ -219,30 +239,87 @@ async function connectGmail() {
   auth.searchParams.set('scope', scope);
   auth.searchParams.set('access_type', 'offline');
   auth.searchParams.set('prompt', 'consent');
+  auth.searchParams.set('include_granted_scopes', 'false');
+  auth.searchParams.set('state', state);
+  auth.searchParams.set('code_challenge', codeChallenge);
+  auth.searchParams.set('code_challenge_method', 'S256');
+
   await shell.openExternal(auth.toString());
 
   const result = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { try { server.close(); } catch (_) {} reject(new Error('Время ожидания Google OAuth истекло.')); }, 180000);
+    let finished = false;
+    const finish = (fn, value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      try { server.close(); } catch (_) {}
+      fn(value);
+    };
+    const timer = setTimeout(() => finish(reject, new Error('Время ожидания Google OAuth истекло.')), 180000);
     server.on('request', (req, res) => {
       try {
         const u = new URL(req.url, redirect);
+        const returnedState = u.searchParams.get('state');
         const code = u.searchParams.get('code');
         const error = u.searchParams.get('error');
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', Connection: 'close' });
-        res.end('<h2>Mail2Telegram: Gmail подключён. Это окно можно закрыть.</h2>');
-        clearTimeout(timer); server.close();
-        if (error) reject(new Error(`Google OAuth: ${error}`));
-        else if (!code) reject(new Error('Google не вернул OAuth code.'));
-        else resolve(code);
-      } catch (e) { clearTimeout(timer); server.close(); reject(e); }
+        res.end('<h2>Mail2Telegram: Gmail подключение завершено. Это окно можно закрыть.</h2>');
+        if (returnedState !== state) return finish(reject, new Error('Google OAuth: неверный state. Попробуйте подключить Gmail ещё раз.'));
+        if (error) return finish(reject, new Error(`Google OAuth: ${error}${u.searchParams.get('error_description') ? ` — ${u.searchParams.get('error_description')}` : ''}`));
+        if (!code) return finish(reject, new Error('Google не вернул OAuth code.'));
+        finish(resolve, { code, redirect, codeVerifier });
+      } catch (e) { finish(reject, e); }
     });
   });
 
-  const form = new URLSearchParams({ code: result, client_id: clientId, client_secret: clientSecret, redirect_uri: redirect, grant_type: 'authorization_code' }).toString();
-  const token = await requestJson('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, form);
-  if (!token.refresh_token) throw new Error('Google не вернул refresh token. Нажмите «Подключить Gmail» ещё раз.');
-  setSecret(d, 'google_refresh_token', token.refresh_token);
-  const profile = await requestJson('https://gmail.googleapis.com/gmail/v1/users/me/profile', { headers: { Authorization: `Bearer ${token.access_token}` } });
+  const form = new URLSearchParams({
+    code: result.code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: result.redirect,
+    grant_type: 'authorization_code',
+    code_verifier: result.codeVerifier
+  }).toString();
+  return requestJson('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  }, form);
+}
+
+async function connectGmail() {
+  const d = loadData();
+  const clientId = getSecret(d, 'google_client_id');
+  const clientSecret = getSecret(d, 'google_client_secret');
+  if (!clientId) throw new Error('Сначала сохраните Google OAuth Client ID.');
+  if (!clientSecret) throw new Error('Сначала сохраните Google OAuth Client Secret.');
+
+  // First attempt. We explicitly request offline consent so Google can issue a refresh token.
+  let token = await runGoogleOAuth(clientId, clientSecret);
+
+  // Google may omit refresh_token when this account has an existing grant for this OAuth client.
+  // If there is no previously saved token, revoke the newly issued access token and repeat the
+  // authorization once. This clears the old grant and makes Google issue a fresh refresh token.
+  if (!token.refresh_token && !getSecret(d, 'google_refresh_token') && token.access_token) {
+    await revokeGoogleToken(token.access_token);
+    token = await runGoogleOAuth(clientId, clientSecret);
+  }
+
+  if (!token.refresh_token) {
+    const existingRefresh = getSecret(d, 'google_refresh_token');
+    if (!existingRefresh) {
+      const details = token.error_description || token.error || `ответ содержит поля: ${Object.keys(token).join(', ') || 'нет'}`;
+      throw new Error(`Google не вернул refresh token (${details}). Если окно Google было закрыто или разрешение не подтверждено, нажмите «Подключить Gmail» ещё раз.`);
+    }
+    // Google legitimately omits a new refresh token for an existing grant.
+    // Keep the already stored token instead of destroying it.
+  } else {
+    setSecret(d, 'google_refresh_token', token.refresh_token);
+  }
+
+  if (!token.access_token) throw new Error(`Google не вернул access token: ${JSON.stringify(token).slice(0, 1000)}`);
+  const profile = await requestJson('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+    headers: { Authorization: `Bearer ${token.access_token}` }
+  });
   d.gmail.email = profile.emailAddress || '';
   saveData(d);
   return d.gmail.email || 'Gmail подключён';
