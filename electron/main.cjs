@@ -384,10 +384,10 @@ async function makePost(d, subject, sender, body, customPrompt) {
   if (!key) throw new Error('Google Gemini API key не задан. Получите ключ в Google AI Studio и сохраните его в Settings.');
   const prompt = customPrompt && customPrompt.trim() ? customPrompt : 'Сделай короткий пост для Telegram на русском языке по содержимому письма. Не выдумывай факты. Верни только JSON без markdown: {"title":"...","content":"..."}. Заголовок до 100 символов, текст до 3500 символов.';
   const input = `${prompt}\n\nОтправитель: ${sender}\nТема: ${subject}\n\nПисьмо:\n${body}`;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(key)}`;
   const v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
     contents: [{ role: 'user', parts: [{ text: input }] }],
-    generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1200 }
+    generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 4096, thinkingConfig: { thinkingLevel: 'low' } }
   });
   const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('') || '';
   if (!text) throw new Error(`Gemini: не найден текст ответа: ${JSON.stringify(v).slice(0, 1500)}`);
@@ -402,10 +402,10 @@ async function testGemini() {
   const d = loadData();
   const key = getSecret(d, 'gemini_api_key');
   if (!key) throw new Error('Google Gemini API key не задан.');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${encodeURIComponent(key)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(key)}`;
   const v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
     contents: [{ role: 'user', parts: [{ text: 'Ответь одним словом: OK' }] }],
-    generationConfig: { maxOutputTokens: 10 }
+    generationConfig: { maxOutputTokens: 256, thinkingConfig: { thinkingLevel: 'low' } }
   });
   const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('').trim() || '';
   if (!text) throw new Error(`Gemini не вернул ответ: ${JSON.stringify(v).slice(0, 1000)}`);

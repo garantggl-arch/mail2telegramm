@@ -4,7 +4,7 @@ Desktop-приложение для Windows 7: Gmail OAuth → получени�
 
 ## AI без OpenAI API
 
-Для генерации постов используется **Google Gemini API**, а не OpenAI API. Для `gemini-3.8-flash` Google указывает Free Tier для этой модели; фактические лимиты зависят от доступности Free Tier для аккаунта и текущих квот Google.
+Для генерации постов используется **Google Gemini API**, а не OpenAI API. Для `gemini-3-flash-preview` Google указывает Free Tier для этой модели; фактические лимиты зависят от доступности Free Tier для аккаунта и текущих квот Google.
 
 Ключ можно создать в Google AI Studio: https://aistudio.google.com/apikey
 
@@ -24,3 +24,6 @@ Desktop-приложение для Windows 7: Gmail OAuth → получени�
 
 
 Win7 fix: electron-builder explicitly copies node_modules/electron/dist/ffmpeg.dll to the application root to prevent the missing ffmpeg.dll startup error.
+
+
+Gemini model: gemini-3-flash-preview (Free Tier). Thinking level is set to low to avoid MAX_TOKENS truncation.
