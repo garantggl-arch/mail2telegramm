@@ -213,8 +213,20 @@ function base64urlDecode(s) {
 }
 function decodeHtmlEntities(value) {
   return String(value || '')
-    .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
-    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>');
+    // Common named entities used by HTML email templates. In particular,
+    // &nbsp; and &zwnj; must not leak into Telegram as literal text.
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&zwnj;/gi, '')
+    .replace(/&zwj;/gi, '')
+    .replace(/&thinsp;/gi, ' ')
+    .replace(/&ensp;/gi, ' ')
+    .replace(/&emsp;/gi, ' ')
+    .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&apos;/gi, "'").replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_, code) => {
+      const n = code[0].toLowerCase() === 'x' ? parseInt(code.slice(1), 16) : parseInt(code, 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : _;
+    });
 }
 function extractParts(part, acc = { text: '', html: '', links: [], images: [] }) {
   const mime = part && part.mimeType || '';
@@ -470,18 +482,28 @@ function emailHtmlToTelegramHtml(html) {
   const anchors = [];
   source = source.replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
     href = decodeHtmlEntities(href).trim();
+    const rawAnchor = String(_ || '');
     const cleanLabel = String(label || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     if (!/^https?:\/\//i.test(href) || !cleanLabel) return cleanLabel;
     const token = `@@MAIL2TG_LINK_${anchors.length}@@`;
-    anchors.push({ token, href, label: cleanLabel });
+    const isAccessButton = /Получить\s+доступ/i.test(cleanLabel);
+    anchors.push({ token, href, label: cleanLabel, isAccessButton });
     return token;
   });
   source = decodeHtmlEntities(source).replace(/<[^>]+>/g, ' ');
-  source = source.replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/[ \t]{2,}/g, ' ');
+  source = source.replace(/[\u200b\u200c\u200d\ufeff]/g, '')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/[ \t]{2,}/g, ' ');
   source = source.split('\n').map(x => x.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
   let out = escapeTelegramHtml(source);
   for (const a of anchors) {
-    out = out.replace(a.token, `<a href="${escapeTelegramHtml(a.href)}">${escapeTelegramHtml(a.label)}</a>`);
+    // Telegram HTML has no arbitrary button element. Keep the access action
+    // at the exact place where the email had its button and make it a bold
+    // clickable link inside the post body (not a separate reply keyboard).
+    const rendered = a.isAccessButton
+      ? `<a href="${escapeTelegramHtml(a.href)}"><b>${escapeTelegramHtml(a.label)}</b></a>`
+      : `<a href="${escapeTelegramHtml(a.href)}">${escapeTelegramHtml(a.label)}</a>`;
+    out = out.replace(a.token, rendered);
   }
   if (importantFootnote) {
     const normalized = importantFootnote.replace(/\s+/g, ' ').trim();
@@ -597,13 +619,12 @@ function makeMultipart(fields, file) {
   chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
   return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
-async function sendTelegramPhoto(d, image, caption, buttonUrl) {
+async function sendTelegramPhoto(d, image, caption) {
   const token = getSecret(d, 'telegram_bot_token');
   const chat = d.settings.telegramChatId;
   if (!token || !chat) throw new Error('Telegram не настроен.');
-  const reply_markup = buttonUrl ? { inline_keyboard: [[{ text: 'Получить доступ*', url: buttonUrl }]] } : undefined;
+  // The access action is part of the post body now, not a separate Telegram keyboard.
   const fields = { chat_id: chat, caption: String(caption || '').slice(0, 1024), parse_mode: 'HTML' };
-  if (reply_markup) fields.reply_markup = JSON.stringify(reply_markup);
   if (image.data) {
     const form = makeMultipart(fields, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || 'image/jpeg', data: image.data });
     const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': form.contentType } }, form.body);
@@ -642,7 +663,6 @@ async function sendTelegramPost(d, post) {
   // The published text is the original email HTML, not Gemini's rewritten text.
   const content = emailHtmlToTelegramHtml(email.body_html || email.body_text || post.content || '');
   const images = publishableEmailImages(email);
-  const buttonUrl = extractAccessButton(email.body_html || '');
   const [caption, remainder] = splitTelegramHtml(content, 1024);
   if (!images.length) {
     if (content.length <= 4096) return sendTelegramHtml(d, content);
@@ -653,7 +673,7 @@ async function sendTelegramPost(d, post) {
   }
   let firstMessage = '';
   try {
-    firstMessage = await sendTelegramPhoto(d, images[0], caption, buttonUrl);
+    firstMessage = await sendTelegramPhoto(d, images[0], caption);
   } catch (_) {}
   if (!firstMessage) return sendTelegramHtml(d, content);
   if (remainder) {
