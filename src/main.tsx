@@ -13,7 +13,7 @@ const invoke = <T = unknown>(command: string, args?: unknown) =>
   window.mail2telegram.invoke<T>(command, args);
 
 
-type Post={id:string;title:string;content:string;source?:string;status:string;created_at?:string};
+type Post={id:string;email_id?:string;title:string;content:string;source?:string;status:string;created_at?:string};
 type Email={id:string;sender?:string;subject?:string;received_at?:string;status:string};
 
 type Config={gmail:boolean;gemini:boolean;telegram:boolean};
