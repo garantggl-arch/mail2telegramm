@@ -491,8 +491,13 @@ function emailHtmlToTelegramHtml(html) {
     return token;
   });
   source = decodeHtmlEntities(source).replace(/<[^>]+>/g, ' ');
-  // Remove the newsletter preheader "Готовые алгоритмы". It is not part of the article body.
-  source = source.replace(/^\s*Готовые\s+алгоритмы\s*/i, '');
+  // The newsletter preheader and its table/spacing are not part of the article body.
+  // Start the Telegram post exactly at the real article heading, so HTML-template
+  // whitespace/cells cannot turn into a large blank area above the heading.
+  const headingMarker = 'Отчётность и уплата за 9 месяцев: что нового?';
+  const headingPos = source.toLocaleLowerCase('ru-RU').indexOf(headingMarker.toLocaleLowerCase('ru-RU'));
+  if (headingPos >= 0) source = source.slice(headingPos);
+  source = source.replace(/^[\s\u00a0]+/, '');
   source = source.replace(/[\u200b\u200c\u200d\ufeff]/g, '')
     .replace(/\r/g, '')
     .replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/[ \t]{2,}/g, ' ');
@@ -810,7 +815,7 @@ async function syncAndProcess() {
       for (const a of d.automations.filter(x => x.enabled !== false)) {
         if (!matchesAutomation(a, e.sender || '', e.subject || '', body)) continue;
         const made = await makePost(d, e.subject || '', e.sender || '', body, a.prompt);
-        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: stripEmailFooter(e.body_text || e.body_html || made.content), image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
+        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: emailHtmlToTelegramHtml(e.body_html || e.body_text || made.content), preview_image_url: (publishableEmailImages(e)[0] || {}).url || '', image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
         d.posts.unshift(post); generated++;
         if (a.mode === 'automatic') {
           try { const mid = await sendTelegramPost(d, post); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); } catch (err) { post.status = 'queued'; post.error = String(err.message || err); }
@@ -846,7 +851,15 @@ ipcMain.handle('get_settings', async () => {
   };
 });
 ipcMain.handle('list_emails', async () => loadData().emails.slice(0, 100));
-ipcMain.handle('list_posts', async () => loadData().posts.slice(0, 100));
+ipcMain.handle('list_posts', async () => {
+  const d = loadData();
+  return d.posts.slice(0, 100).map(p => {
+    const email = d.emails.find(e => e.id === p.email_id);
+    if (!email) return p;
+    const images = publishableEmailImages(email);
+    return { ...p, content: emailHtmlToTelegramHtml(email.body_html || email.body_text || p.content || ''), preview_image_url: (images[0] || {}).url || p.preview_image_url || '' };
+  });
+});
 ipcMain.handle('save_credentials', async (_event, input = {}) => {
   const d = loadData();
   // Empty fields mean 'leave the saved value unchanged'. This prevents the UI
@@ -873,7 +886,8 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
   const made = await makePost(d, email.subject || '', email.sender || '', body, prompt);
   if (existing) {
     existing.title = made.title;
-    existing.content = stripEmailFooter(email.body_text || email.body_html || made.content);
+    existing.content = emailHtmlToTelegramHtml(email.body_html || email.body_text || made.content);
+    existing.preview_image_url = (publishableEmailImages(email)[0] || {}).url || '';
     existing.image_count = publishableEmailImages(email).length;
     existing.status = 'draft';
     delete existing.error;
@@ -885,7 +899,8 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
     id: crypto.randomUUID(),
     email_id: email.id,
     title: made.title,
-    content: stripEmailFooter(email.body_text || email.body_html || made.content),
+    content: emailHtmlToTelegramHtml(email.body_html || email.body_text || made.content),
+    preview_image_url: (publishableEmailImages(email)[0] || {}).url || '',
     image_count: publishableEmailImages(email).length,
     status: 'draft',
     source: email.sender || 'Gmail',
