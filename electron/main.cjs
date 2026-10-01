@@ -504,22 +504,50 @@ async function sendTelegramPost(d, post) {
   return firstMessage;
 }
 
+async function geminiGenerate(d, key, input, opts = {}) {
+  const models = opts.models || ['gemini-3.5-flash-lite', 'gemini-3.7-flash', 'gemini-3.6-flash'];
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: input }] }],
+    generationConfig: {
+      responseMimeType: opts.json ? 'application/json' : undefined,
+      temperature: opts.temperature ?? 0.2,
+      maxOutputTokens: opts.maxOutputTokens ?? 2048
+    }
+  };
+  if (!payload.generationConfig.responseMimeType) delete payload.generationConfig.responseMimeType;
+
+  let lastError = null;
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, payload);
+      } catch (e) {
+        lastError = e;
+        const msg = String(e || '');
+        const retryable = /HTTP (429|500|502|503|504)/.test(msg) || /UNAVAILABLE|high demand|temporarily/i.test(msg);
+        if (!retryable || attempt === 1) break;
+        await new Promise(r => setTimeout(r, 2500));
+      }
+    }
+  }
+  throw lastError || new Error('Gemini: не удалось получить ответ');
+}
+
 async function makePost(d, subject, sender, body, customPrompt) {
   const key = getSecret(d, 'gemini_api_key');
   if (!key) throw new Error('Google Gemini API key не задан. Получите ключ в Google AI Studio и сохраните его в Settings.');
   const prompt = customPrompt && customPrompt.trim() ? customPrompt : 'Сделай короткий пост для Telegram на русском языке по содержимому письма. Не выдумывай факты. Верни только JSON без markdown: {"title":"...","content":"..."}. Заголовок до 100 символов, текст до 3500 символов.';
   const input = `${prompt}\n\nОтправитель: ${sender}\nТема: ${subject}\n\nПисьмо:\n${body}`;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(key)}`;
-  const geminiPayload = {
-    contents: [{ role: 'user', parts: [{ text: input }] }],
-    generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 4096, thinkingConfig: { thinkingLevel: 'low' } }
-  };
   let v;
   try {
-    v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, geminiPayload);
-  } catch (firstError) {
-    await new Promise(r => setTimeout(r, 1500));
-    v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, geminiPayload);
+    v = await geminiGenerate(d, key, input, { json: true, maxOutputTokens: 3072 });
+  } catch (e) {
+    const msg = String(e || '');
+    if (/HTTP 503|UNAVAILABLE|high demand/i.test(msg)) {
+      throw new Error('Gemini временно перегружен. Приложение попробовало несколько бесплатных моделей. Повторите через 1–2 минуты.');
+    }
+    throw e;
   }
   const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('') || '';
   if (!text) throw new Error(`Gemini: не найден текст ответа: ${JSON.stringify(v).slice(0, 1500)}`);
@@ -534,11 +562,16 @@ async function testGemini() {
   const d = loadData();
   const key = getSecret(d, 'gemini_api_key');
   if (!key) throw new Error('Google Gemini API key не задан.');
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(key)}`;
-  const v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
-    contents: [{ role: 'user', parts: [{ text: 'Ответь одним словом: OK' }] }],
-    generationConfig: { maxOutputTokens: 256, thinkingConfig: { thinkingLevel: 'low' } }
-  });
+  let v;
+  try {
+    v = await geminiGenerate(d, key, 'Ответь одним словом: OK', { maxOutputTokens: 64 });
+  } catch (e) {
+    const msg = String(e || '');
+    if (/HTTP 503|UNAVAILABLE|high demand/i.test(msg)) {
+      throw new Error('Gemini временно перегружен. Проверка попробовала несколько бесплатных моделей. Повторите позже.');
+    }
+    throw e;
+  }
   const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('').trim() || '';
   if (!text) throw new Error(`Gemini не вернул ответ: ${JSON.stringify(v).slice(0, 1000)}`);
   return 'Gemini подключён';
