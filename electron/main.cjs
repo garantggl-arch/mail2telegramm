@@ -104,7 +104,7 @@ function parseHttpResponse(buffer) {
 function requestJson(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    const data = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
+    const data = body == null ? null : (Buffer.isBuffer(body) ? body : (typeof body === 'string' ? body : JSON.stringify(body)));
     const headers = { ...(options.headers || {}) };
     if (data && !headers['Content-Length']) headers['Content-Length'] = Buffer.byteLength(data);
     const d = loadData();
@@ -175,7 +175,8 @@ function requestJson(url, options = {}, body = null) {
         for (const [k, v] of Object.entries(headers)) request += `${k}: ${v}\r\n`;
         request += '\r\n';
         if (data) request += data;
-        secure.write(request);
+        const headBuffer = Buffer.from(request, 'utf8');
+        secure.write(data ? Buffer.concat([headBuffer, Buffer.from(data)]) : headBuffer);
 
         let responseBuffer = leftover.length ? Buffer.from(leftover) : Buffer.alloc(0);
         secure.on('data', chunk => { responseBuffer = Buffer.concat([responseBuffer, Buffer.from(chunk)]); });
@@ -211,15 +212,53 @@ function base64urlDecode(s) {
   if (!s) return '';
   try { return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); } catch (_) { return ''; }
 }
-function extractParts(part, acc = { text: '', html: '' }) {
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>');
+}
+function extractParts(part, acc = { text: '', html: '', links: [], images: [] }) {
   const mime = part && part.mimeType || '';
   const data = part && part.body && part.body.data || '';
   const decoded = base64urlDecode(data);
   if (mime === 'text/plain') acc.text += decoded;
   if (mime === 'text/html') acc.html += decoded;
+  if (mime.startsWith('image/')) {
+    acc.images.push({
+      mimeType: mime,
+      filename: part.filename || 'image',
+      attachmentId: part.body && part.body.attachmentId || '',
+      contentId: header(part.headers || [], 'Content-ID').replace(/^<|>$/g, ''),
+      data: data || ''
+    });
+  }
   for (const p of (part && part.parts) || []) extractParts(p, acc);
   return acc;
 }
+function enrichEmail(parts) {
+  const html = parts.html || '';
+  const links = [];
+  const images = Array.isArray(parts.images) ? parts.images.slice() : [];
+  const addLink = href => {
+    href = decodeHtmlEntities(href).trim();
+    if (!href || !/^https?:\/\//i.test(href)) return;
+    if (!links.includes(href)) links.push(href);
+  };
+  html.replace(/<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>/gi, (_, href) => { addLink(href); return _; });
+  html.replace(/<img\b[^>]*?src\s*=\s*["']([^"']+)["'][^>]*>/gi, (_, src) => {
+    src = decodeHtmlEntities(src).trim();
+    if (/^https?:\/\//i.test(src)) {
+      if (!images.some(x => x.url === src)) images.push({ url: src, mimeType: 'image/*', filename: 'image' });
+    } else if (/^cid:/i.test(src)) {
+      const cid = src.slice(4).replace(/^<|>$/g, '');
+      const found = images.find(x => x.contentId === cid);
+      if (found) found.inline = true;
+    }
+    return _;
+  });
+  return { links, images };
+}
+
 function header(headers, name) {
   const h = (headers || []).find(x => String(x.name || '').toLowerCase() === name.toLowerCase());
   return h ? h.value || '' : '';
@@ -367,16 +406,102 @@ async function syncGmail(d) {
   const list = await requestJson('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=newer_than:7d', { headers: { Authorization: `Bearer ${access}` } });
   let count = 0;
   for (const item of (list.messages || [])) {
-    const exists = d.emails.some(e => e.provider_id === item.id);
-    if (exists) continue;
+    const existing = d.emails.find(e => e.provider_id === item.id);
+    if (existing && existing.rich_extracted) continue;
     const m = await requestJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?format=full`, { headers: { Authorization: `Bearer ${access}` } });
     const h = m.payload && m.payload.headers || [];
     const parts = extractParts(m.payload || {});
+    const rich = enrichEmail(parts);
     const received = new Date(Number(m.internalDate || Date.now())).toISOString();
-    d.emails.push({ id: crypto.randomUUID(), provider_id: m.id, thread_id: m.threadId || '', sender: header(h, 'from'), recipient: header(h, 'to'), subject: header(h, 'subject'), body_text: parts.text, body_html: parts.html, received_at: received, status: 'received' });
+    if (existing) {
+      existing.body_text = existing.body_text || parts.text;
+      existing.body_html = existing.body_html || parts.html;
+      existing.links = rich.links;
+      existing.images = rich.images;
+      existing.rich_extracted = true;
+      continue;
+    }
+    d.emails.push({ id: crypto.randomUUID(), provider_id: m.id, thread_id: m.threadId || '', sender: header(h, 'from'), recipient: header(h, 'to'), subject: header(h, 'subject'), body_text: parts.text, body_html: parts.html, links: rich.links, images: rich.images, rich_extracted: true, received_at: received, status: 'received' });
     count++;
   }
   return count;
+}
+
+function uniqueUrls(urls) {
+  return Array.from(new Set((urls || []).filter(u => /^https?:\/\//i.test(String(u || '')))));
+}
+function appendOriginalLinks(content, links) {
+  const urls = uniqueUrls(links);
+  if (!urls.length) return content;
+  const existing = new Set((String(content || '').match(/https?:\/\/[^\s)]+/gi) || []).map(x => x.replace(/[.,;]+$/g, '')));
+  const missing = urls.filter(u => !existing.has(u));
+  if (!missing.length) return content;
+  return `${content.trim()}\n\nСсылки из исходного письма:\n${missing.map(u => `• ${u}`).join('\n')}`;
+}
+async function gmailAttachmentBuffer(d, email, image) {
+  if (image.data) return Buffer.from(image.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  if (!image.attachmentId) return null;
+  const access = await gmailAccessToken(d);
+  const v = await requestJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(email.provider_id)}/attachments/${encodeURIComponent(image.attachmentId)}`, { headers: { Authorization: `Bearer ${access}` } });
+  if (!v.data) return null;
+  return Buffer.from(v.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+function makeMultipart(fields, file) {
+  const boundary = `----Mail2Telegram${crypto.randomBytes(12).toString('hex')}`;
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields)) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${String(value)}\r\n`, 'utf8'));
+  }
+  chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${String(file.filename || 'image.jpg').replace(/"/g, '')}"\r\nContent-Type: ${file.mimeType || 'application/octet-stream'}\r\n\r\n`, 'utf8'));
+  chunks.push(file.data);
+  chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
+  return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+async function sendTelegramPhoto(d, image, caption) {
+  const token = getSecret(d, 'telegram_bot_token');
+  const chat = d.settings.telegramChatId;
+  if (!token || !chat) throw new Error('Telegram не настроен.');
+  if (image.url) {
+    const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
+      chat_id: chat, photo: image.url, caption: String(caption || '').slice(0, 1024)
+    });
+    if (!v.ok) throw new Error(JSON.stringify(v));
+    return String(v.result && v.result.message_id || '');
+  }
+  const form = makeMultipart({ chat_id: chat, caption: String(caption || '').slice(0, 1024) }, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || 'image/jpeg', data: image.data });
+  const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': form.contentType } }, form.body);
+  if (!v.ok) throw new Error(JSON.stringify(v));
+  return String(v.result && v.result.message_id || '');
+}
+
+async function sendTelegramPost(d, post) {
+  const email = d.emails.find(e => e.id === post.email_id);
+  const links = email ? (email.links || []) : [];
+  const content = appendOriginalLinks(post.content, links);
+  const images = email ? (email.images || []) : [];
+  if (!images.length) return sendTelegram(d, content);
+  let firstMessage = '';
+  let sentAny = false;
+  for (let i = 0; i < Math.min(images.length, 10); i++) {
+    const ref = images[i];
+    try {
+      let image = ref;
+      if (!ref.url) {
+        const data = await gmailAttachmentBuffer(d, email, ref);
+        if (!data || !data.length) continue;
+        image = { ...ref, data };
+      }
+      const caption = i === 0 ? content : '';
+      const mid = await sendTelegramPhoto(d, image, caption);
+      if (!firstMessage) firstMessage = mid;
+      sentAny = true;
+    } catch (_) {}
+  }
+  if (!sentAny || content.length > 1024) {
+    const mid = await sendTelegram(d, content);
+    if (!firstMessage) firstMessage = mid;
+  }
+  return firstMessage;
 }
 
 async function makePost(d, subject, sender, body, customPrompt) {
@@ -456,10 +581,10 @@ async function syncAndProcess() {
       for (const a of d.automations.filter(x => x.enabled !== false)) {
         if (!matchesAutomation(a, e.sender || '', e.subject || '', body)) continue;
         const made = await makePost(d, e.subject || '', e.sender || '', body, a.prompt);
-        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: made.content, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
+        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: appendOriginalLinks(made.content, e.links || []), image_count: (e.images || []).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
         d.posts.unshift(post); generated++;
         if (a.mode === 'automatic') {
-          try { const mid = await sendTelegram(d, post.content); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); } catch (err) { post.status = 'queued'; post.error = String(err.message || err); }
+          try { const mid = await sendTelegramPost(d, post); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); } catch (err) { post.status = 'queued'; post.error = String(err.message || err); }
         }
         break;
       }
@@ -522,7 +647,8 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
     id: crypto.randomUUID(),
     email_id: email.id,
     title: made.title,
-    content: made.content,
+    content: appendOriginalLinks(made.content, email.links || []),
+    image_count: (email.images || []).length,
     status: 'draft',
     source: email.sender || 'Gmail',
     created_at: new Date().toISOString()
@@ -535,7 +661,7 @@ ipcMain.handle('publish_post', async (_event, args = {}) => {
   const d = loadData(); const post = d.posts.find(p => p.id === args.postId);
   if (!post) throw new Error('Пост не найден');
   if (post.status === 'published') return post.telegram_message_id || 'already-published';
-  const mid = await sendTelegram(d, post.content); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); saveData(d); return mid;
+  const mid = await sendTelegramPost(d, post); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); saveData(d); return mid;
 });
 ipcMain.handle('save_automation', async (_event, input = {}) => {
   const d = loadData();
