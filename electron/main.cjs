@@ -430,13 +430,48 @@ async function syncGmail(d) {
 function uniqueUrls(urls) {
   return Array.from(new Set((urls || []).filter(u => /^https?:\/\//i.test(String(u || '')))));
 }
+function stripEmailFooter(body) {
+  const text = String(body || '');
+  const marker = /Хотите\s+уточнить\s+детали,?\s*напишите\s+нам\s*[—–-]?/i;
+  const m = text.search(marker);
+  return m >= 0 ? text.slice(0, m).trim() : text.trim();
+}
+function extractAccessButton(html) {
+  const source = String(html || '');
+  const re = /<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(source))) {
+    const label = decodeHtmlEntities(String(m[2] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    if (/Получить\s+доступ/i.test(label) && /^https?:\/\//i.test(m[1])) return decodeHtmlEntities(m[1]);
+  }
+  return '';
+}
+function publishableEmailImages(email) {
+  const images = Array.isArray(email && email.images) ? email.images : [];
+  // Publish only the first real content image. Tracking pixels and the second
+  // portrait/signature image from the newsletter are intentionally skipped.
+  return images.filter(x => !/read\.sendsay\.ru\/1\.gif/i.test(String(x.url || ''))).slice(0, 1);
+}
+function linksForPost(email) {
+  const html = String(email && email.body_html || '');
+  const marker = /Хотите\s+уточнить\s+детали,?\s*напишите\s+нам/i;
+  const cut = html.search(marker);
+  const source = cut >= 0 ? html.slice(0, cut) : html;
+  const links = [];
+  source.replace(/<a\b[^>]*?href\s*=\s*[\"']([^\"']+)[\"'][^>]*>/gi, (_, href) => {
+    href = decodeHtmlEntities(href).trim();
+    if (/^https?:\/\//i.test(href) && !links.includes(href)) links.push(href);
+    return _;
+  });
+  return links.length ? links : (email && email.links || []);
+}
 function appendOriginalLinks(content, links) {
   const urls = uniqueUrls(links);
-  if (!urls.length) return content;
+  if (!urls.length) return String(content || '').trim();
   const existing = new Set((String(content || '').match(/https?:\/\/[^\s)]+/gi) || []).map(x => x.replace(/[.,;]+$/g, '')));
   const missing = urls.filter(u => !existing.has(u));
-  if (!missing.length) return content;
-  return `${content.trim()}\n\nСсылки из исходного письма:\n${missing.map(u => `• ${u}`).join('\n')}`;
+  if (!missing.length) return String(content || '').trim();
+  return `${String(content || '').trim()}\n\nСсылки из исходного письма:\n${missing.map(u => `• ${u}`).join('\n')}`;
 }
 async function gmailAttachmentBuffer(d, email, image) {
   if (image.data) return Buffer.from(image.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
@@ -457,18 +492,19 @@ function makeMultipart(fields, file) {
   chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8'));
   return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
-async function sendTelegramPhoto(d, image, caption) {
+async function sendTelegramPhoto(d, image, caption, buttonUrl) {
   const token = getSecret(d, 'telegram_bot_token');
   const chat = d.settings.telegramChatId;
   if (!token || !chat) throw new Error('Telegram не настроен.');
+  const reply_markup = buttonUrl ? { inline_keyboard: [[{ text: 'Получить доступ*', url: buttonUrl }]] } : undefined;
+  const fields = { chat_id: chat, caption: String(caption || '').slice(0, 1024) };
+  if (reply_markup) fields.reply_markup = JSON.stringify(reply_markup);
   if (image.url) {
-    const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
-      chat_id: chat, photo: image.url, caption: String(caption || '').slice(0, 1024)
-    });
+    const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, { ...fields, photo: image.url });
     if (!v.ok) throw new Error(JSON.stringify(v));
     return String(v.result && v.result.message_id || '');
   }
-  const form = makeMultipart({ chat_id: chat, caption: String(caption || '').slice(0, 1024) }, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || 'image/jpeg', data: image.data });
+  const form = makeMultipart(fields, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || 'image/jpeg', data: image.data });
   const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': form.contentType } }, form.body);
   if (!v.ok) throw new Error(JSON.stringify(v));
   return String(v.result && v.result.message_id || '');
@@ -476,28 +512,27 @@ async function sendTelegramPhoto(d, image, caption) {
 
 async function sendTelegramPost(d, post) {
   const email = d.emails.find(e => e.id === post.email_id);
-  const links = email ? (email.links || []) : [];
-  const content = appendOriginalLinks(post.content, links);
-  const images = email ? (email.images || []) : [];
+  const links = email ? linksForPost(email) : [];
+  const content = stripEmailFooter(appendOriginalLinks(post.content, links));
+  const images = email ? publishableEmailImages(email) : [];
+  const buttonUrl = email ? extractAccessButton(email.body_html || '') : '';
   if (!images.length) return sendTelegram(d, content);
   let firstMessage = '';
-  let sentAny = false;
-  for (let i = 0; i < Math.min(images.length, 10); i++) {
-    const ref = images[i];
-    try {
-      let image = ref;
-      if (!ref.url) {
-        const data = await gmailAttachmentBuffer(d, email, ref);
-        if (!data || !data.length) continue;
-        image = { ...ref, data };
-      }
-      const caption = i === 0 ? content : '';
-      const mid = await sendTelegramPhoto(d, image, caption);
-      if (!firstMessage) firstMessage = mid;
-      sentAny = true;
-    } catch (_) {}
-  }
-  if (!sentAny || content.length > 1024) {
+  const ref = images[0];
+  try {
+    let image = ref;
+    if (!ref.url) {
+      const data = await gmailAttachmentBuffer(d, email, ref);
+      if (data && data.length) image = { ...ref, data };
+    }
+    // Telegram photo captions are limited; keep the approved rich text together
+    // with the first image whenever it fits. The access button is attached to it.
+    if (image.data || image.url) {
+      const caption = content.length <= 1024 ? content : content.slice(0, 1021) + '…';
+      firstMessage = await sendTelegramPhoto(d, image, caption, buttonUrl);
+    }
+  } catch (_) {}
+  if (!firstMessage || content.length > 1024) {
     const mid = await sendTelegram(d, content);
     if (!firstMessage) firstMessage = mid;
   }
@@ -617,11 +652,11 @@ async function syncAndProcess() {
     let generated = 0;
     for (const e of d.emails) {
       if (d.posts.some(p => p.email_id === e.id)) continue;
-      const body = e.body_text || e.body_html || '';
+      const body = stripEmailFooter(e.body_text || e.body_html || '');
       for (const a of d.automations.filter(x => x.enabled !== false)) {
         if (!matchesAutomation(a, e.sender || '', e.subject || '', body)) continue;
         const made = await makePost(d, e.subject || '', e.sender || '', body, a.prompt);
-        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: appendOriginalLinks(made.content, e.links || []), image_count: (e.images || []).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
+        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: appendOriginalLinks(made.content, linksForPost(e)), image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
         d.posts.unshift(post); generated++;
         if (a.mode === 'automatic') {
           try { const mid = await sendTelegramPost(d, post); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); } catch (err) { post.status = 'queued'; post.error = String(err.message || err); }
@@ -681,14 +716,14 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
   if (existing) return existing.id;
   const automation = d.automations.find(a => a.enabled !== false && matchesAutomation(a, email.sender || '', email.subject || '', email.body_text || email.body_html || ''));
   const prompt = automation ? automation.prompt : '';
-  const body = email.body_text || email.body_html || '';
+  const body = stripEmailFooter(email.body_text || email.body_html || '');
   const made = await makePost(d, email.subject || '', email.sender || '', body, prompt);
   const post = {
     id: crypto.randomUUID(),
     email_id: email.id,
     title: made.title,
-    content: appendOriginalLinks(made.content, email.links || []),
-    image_count: (email.images || []).length,
+    content: appendOriginalLinks(made.content, linksForPost(email)),
+    image_count: publishableEmailImages(email).length,
     status: 'draft',
     source: email.sender || 'Gmail',
     created_at: new Date().toISOString()
