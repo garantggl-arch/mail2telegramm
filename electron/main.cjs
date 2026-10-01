@@ -483,7 +483,7 @@ function emailHtmlToTelegramHtml(html) {
   source = source.replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
     href = decodeHtmlEntities(href).trim();
     const rawAnchor = String(_ || '');
-    const cleanLabel = String(label || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const cleanLabel = decodeHtmlEntities(String(label || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
     if (!/^https?:\/\//i.test(href) || !cleanLabel) return cleanLabel;
     const token = `@@MAIL2TG_LINK_${anchors.length}@@`;
     const isAccessButton = /Получить\s+доступ/i.test(cleanLabel);
@@ -491,11 +491,17 @@ function emailHtmlToTelegramHtml(html) {
     return token;
   });
   source = decodeHtmlEntities(source).replace(/<[^>]+>/g, ' ');
+  // Remove the newsletter preheader "Готовые алгоритмы". It is not part of the article body.
+  source = source.replace(/^\s*Готовые\s+алгоритмы\s*/i, '');
   source = source.replace(/[\u200b\u200c\u200d\ufeff]/g, '')
     .replace(/\r/g, '')
     .replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/[ \t]{2,}/g, ' ');
   source = source.split('\n').map(x => x.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
   let out = escapeTelegramHtml(source);
+  // The actual article heading is kept from the source email and rendered bold.
+  const articleHeading = 'Отчётность и уплата за 9 месяцев: что нового?';
+  const escapedHeading = escapeTelegramHtml(articleHeading);
+  out = out.replace(escapedHeading, `<b>${escapedHeading}</b>`);
   for (const a of anchors) {
     // Telegram HTML has no arbitrary button element. Keep the access action
     // at the exact place where the email had its button and make it a bold
