@@ -174,7 +174,6 @@ function requestJson(url, options = {}, body = null) {
         let request = `${options.method || 'GET'} ${requestPath} HTTP/1.1\r\nHost: ${u.hostname}${u.port && u.port !== '443' ? ':' + u.port : ''}\r\nConnection: close\r\n`;
         for (const [k, v] of Object.entries(headers)) request += `${k}: ${v}\r\n`;
         request += '\r\n';
-        if (data) request += data;
         const headBuffer = Buffer.from(request, 'utf8');
         secure.write(data ? Buffer.concat([headBuffer, Buffer.from(data)]) : headBuffer);
 
@@ -407,7 +406,7 @@ async function syncGmail(d) {
   let count = 0;
   for (const item of (list.messages || [])) {
     const existing = d.emails.find(e => e.provider_id === item.id);
-    if (existing && existing.rich_extracted) continue;
+    if (existing && existing.rich_extracted && existing.body_html && Array.isArray(existing.images) && existing.images.length) continue;
     const m = await requestJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?format=full`, { headers: { Authorization: `Bearer ${access}` } });
     const h = m.payload && m.payload.headers || [];
     const parts = extractParts(m.payload || {});
@@ -436,9 +435,64 @@ function stripEmailFooter(body) {
   const m = text.search(marker);
   return m >= 0 ? text.slice(0, m).trim() : text.trim();
 }
+function cutEmailFooterHtml(html) {
+  const source = String(html || '');
+  // Remove only the correspondence/footer section beginning with this phrase.
+  // Footnotes such as "* Доступ предоставляется..." are intentionally kept.
+  const marker = /Хотите\s+уточнить\s+детали,?\s*напишите\s+нам\s*[—–-]?/i;
+  const m = source.search(marker);
+  return m >= 0 ? source.slice(0, m) : source;
+}
+function escapeTelegramHtml(value) {
+  return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function extractImportantFootnoteHtml(html) {
+  const source = String(html || '');
+  // Keep the offer footnote associated with the access button. It is content,
+  // not the removable mail footer.
+  const m = source.match(/\*\s*Доступ\s+предоставляется[\s\S]*?Не\s+пропустите\s+звонок!?/i);
+  if (!m) return '';
+  return String(m[0]).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function emailHtmlToTelegramHtml(html) {
+  const original = String(html || '');
+  let source = cutEmailFooterHtml(original);
+  const importantFootnote = extractImportantFootnoteHtml(source);
+  // Remove non-content markup, images and tracking pixels. Images are sent separately.
+  source = source.replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '')
+    .replace(/<!--([\s\S]*?)-->/g, '')
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '• ')
+    .replace(/<\/(p|div|li|h[1-6]|tr|table|section|article)>/gi, '\n')
+    .replace(/<\/(ul|ol)>/gi, '\n');
+  const anchors = [];
+  source = source.replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
+    href = decodeHtmlEntities(href).trim();
+    const cleanLabel = String(label || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!/^https?:\/\//i.test(href) || !cleanLabel) return cleanLabel;
+    const token = `@@MAIL2TG_LINK_${anchors.length}@@`;
+    anchors.push({ token, href, label: cleanLabel });
+    return token;
+  });
+  source = decodeHtmlEntities(source).replace(/<[^>]+>/g, ' ');
+  source = source.replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/[ \t]{2,}/g, ' ');
+  source = source.split('\n').map(x => x.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  let out = escapeTelegramHtml(source);
+  for (const a of anchors) {
+    out = out.replace(a.token, `<a href="${escapeTelegramHtml(a.href)}">${escapeTelegramHtml(a.label)}</a>`);
+  }
+  if (importantFootnote) {
+    const normalized = importantFootnote.replace(/\s+/g, ' ').trim();
+    const normalizedOut = out.replace(/\s+/g, ' ').trim();
+    if (!normalizedOut.includes(normalized)) out = `${out}\n\n${escapeTelegramHtml(importantFootnote)}`;
+  }
+  return out;
+}
 function extractAccessButton(html) {
   const source = String(html || '');
-  const re = /<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)<\/a>/gi;
+  const re = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(source))) {
     const label = decodeHtmlEntities(String(m[2] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
@@ -448,30 +502,81 @@ function extractAccessButton(html) {
 }
 function publishableEmailImages(email) {
   const images = Array.isArray(email && email.images) ? email.images : [];
-  // Publish only the first real content image. Tracking pixels and the second
-  // portrait/signature image from the newsletter are intentionally skipped.
+  // Exactly the first real content image. The second portrait and tracking pixel are not published.
   return images.filter(x => !/read\.sendsay\.ru\/1\.gif/i.test(String(x.url || ''))).slice(0, 1);
 }
 function linksForPost(email) {
-  const html = String(email && email.body_html || '');
-  const marker = /Хотите\s+уточнить\s+детали,?\s*напишите\s+нам/i;
-  const cut = html.search(marker);
-  const source = cut >= 0 ? html.slice(0, cut) : html;
+  const html = cutEmailFooterHtml(email && email.body_html || '');
   const links = [];
-  source.replace(/<a\b[^>]*?href\s*=\s*[\"']([^\"']+)[\"'][^>]*>/gi, (_, href) => {
+  html.replace(/<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>/gi, (_, href) => {
     href = decodeHtmlEntities(href).trim();
     if (/^https?:\/\//i.test(href) && !links.includes(href)) links.push(href);
     return _;
   });
   return links.length ? links : (email && email.links || []);
 }
-function appendOriginalLinks(content, links) {
-  const urls = uniqueUrls(links);
-  if (!urls.length) return String(content || '').trim();
-  const existing = new Set((String(content || '').match(/https?:\/\/[^\s)]+/gi) || []).map(x => x.replace(/[.,;]+$/g, '')));
-  const missing = urls.filter(u => !existing.has(u));
-  if (!missing.length) return String(content || '').trim();
-  return `${String(content || '').trim()}\n\nСсылки из исходного письма:\n${missing.map(u => `• ${u}`).join('\n')}`;
+async function requestBinary(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const d = loadData();
+    const proxy = d.settings && d.settings.proxyEnabled && d.settings.proxyHost ? {
+      host: String(d.settings.proxyHost).trim(), port: Number(d.settings.proxyPort || 3128),
+      user: String(d.settings.proxyUser || ''), password: String(d.settings.proxyPassword || '')
+    } : null;
+    const finish = (res, chunks) => {
+      const headers = Object.fromEntries(Object.entries(res.headers || {}).map(([k,v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(',') : String(v || '')]));
+      const buf = Buffer.concat(chunks);
+      let out = buf;
+      const enc = String(headers['content-encoding'] || '').toLowerCase();
+      try { if (enc.includes('gzip')) out = zlib.gunzipSync(buf); else if (enc.includes('deflate')) out = zlib.inflateSync(buf); } catch (_) {}
+      if ((res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300) resolve({ statusCode: res.statusCode, headers, data: out });
+      else reject(new Error(`HTTP ${res.statusCode || 0} при загрузке изображения`));
+    };
+    if (!proxy) {
+      const req = https.request({ hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: options.method || 'GET', headers: options.headers || {} }, res => {
+        const chunks=[]; res.on('data', c=>chunks.push(Buffer.from(c))); res.on('end',()=>finish(res,chunks));
+      });
+      req.on('error',reject); req.end(); return;
+    }
+    const socket = net.connect(proxy.port, proxy.host);
+    let settled=false; const fail=e=>{if(!settled){settled=true;try{socket.destroy();}catch(_){}reject(e);}};
+    socket.setTimeout(90000,()=>fail(new Error('Прокси: тайм-аут загрузки изображения'))); socket.once('error',fail);
+    socket.once('connect',()=>{
+      let h=`CONNECT ${u.hostname}:${u.port||443} HTTP/1.1\r\nHost: ${u.hostname}:${u.port||443}\r\nProxy-Connection: Keep-Alive\r\n`;
+      if(proxy.user) h+=`Proxy-Authorization: Basic ${Buffer.from(`${proxy.user}:${proxy.password}`).toString('base64')}\r\n`;
+      h+='\r\n'; socket.write(h);
+    });
+    let cb=Buffer.alloc(0); const onData=chunk=>{
+      cb=Buffer.concat([cb,Buffer.from(chunk)]); const marker=cb.indexOf(Buffer.from('\r\n\r\n')); if(marker<0)return;
+      socket.removeListener('data',onData); const status=(cb.slice(0,marker).toString('latin1').match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i)||[])[1];
+      if(Number(status)!==200){fail(new Error(`Прокси CONNECT: ${status||0}`));return;}
+      const secure=tls.connect({socket,servername:u.hostname,rejectUnauthorized:true}); secure.once('error',fail); secure.setTimeout(90000,()=>fail(new Error('HTTPS через прокси: тайм-аут загрузки изображения')));
+      secure.once('secureConnect',()=>{
+        let req=`GET ${u.pathname+u.search} HTTP/1.1\r\nHost: ${u.hostname}\r\nConnection: close\r\nUser-Agent: Mozilla/5.0\r\n`;
+        for(const [k,v] of Object.entries(options.headers||{})) req+=`${k}: ${v}\r\n`; req+='\r\n'; secure.write(req);
+        let rb=Buffer.alloc(0); secure.on('data',c=>rb=Buffer.concat([rb,Buffer.from(c)])); secure.on('end',()=>{
+          if(settled)return; settled=true; const marker=rb.indexOf(Buffer.from('\r\n\r\n')); if(marker<0){reject(new Error('Некорректный ответ изображения'));return;}
+          const lines=rb.slice(0,marker).toString('latin1').split('\r\n'); const first=lines.shift()||''; const m=first.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/i); const headers={};
+          for(const line of lines){const i=line.indexOf(':');if(i>0)headers[line.slice(0,i).trim().toLowerCase()]=line.slice(i+1).trim();}
+          const fake={statusCode:m?Number(m[1]):0,headers}; finish(fake,[rb.slice(marker+4)]);
+        });
+      });
+    }; socket.on('data',onData);
+  });
+}
+function appendOriginalLinks(content, links) { return String(content || '').trim(); }
+function splitTelegramHtml(html, max = 1024) {
+  const text = String(html || '');
+  if (text.length <= max) return [text, ''];
+  const candidates = [text.lastIndexOf('\n\n', max), text.lastIndexOf('\n', max), text.lastIndexOf('</a>', max) + 4];
+  let cut = Math.max(...candidates.filter(x => x > 0));
+  if (cut < 200) cut = max;
+  // Never cut inside an HTML tag.
+  const lt = text.lastIndexOf('<', cut);
+  const gt = text.lastIndexOf('>', cut);
+  if (lt > gt) cut = gt;
+  if (cut <= 0) cut = max;
+  return [text.slice(0, cut).trim(), text.slice(cut).trim()];
 }
 async function gmailAttachmentBuffer(d, email, image) {
   if (image.data) return Buffer.from(image.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
@@ -497,44 +602,67 @@ async function sendTelegramPhoto(d, image, caption, buttonUrl) {
   const chat = d.settings.telegramChatId;
   if (!token || !chat) throw new Error('Telegram не настроен.');
   const reply_markup = buttonUrl ? { inline_keyboard: [[{ text: 'Получить доступ*', url: buttonUrl }]] } : undefined;
-  const fields = { chat_id: chat, caption: String(caption || '').slice(0, 1024) };
+  const fields = { chat_id: chat, caption: String(caption || '').slice(0, 1024), parse_mode: 'HTML' };
   if (reply_markup) fields.reply_markup = JSON.stringify(reply_markup);
+  if (image.data) {
+    const form = makeMultipart(fields, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || 'image/jpeg', data: image.data });
+    const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': form.contentType } }, form.body);
+    if (!v.ok) throw new Error(JSON.stringify(v));
+    return String(v.result && v.result.message_id || '');
+  }
   if (image.url) {
+    try {
+      const downloaded = await requestBinary(image.url);
+      if (downloaded.data && downloaded.data.length) {
+        const form = makeMultipart(fields, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || downloaded.headers['content-type'] || 'image/jpeg', data: downloaded.data });
+        const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': form.contentType } }, form.body);
+        if (!v.ok) throw new Error(JSON.stringify(v));
+        return String(v.result && v.result.message_id || '');
+      }
+    } catch (_) {}
     const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, { ...fields, photo: image.url });
     if (!v.ok) throw new Error(JSON.stringify(v));
     return String(v.result && v.result.message_id || '');
   }
-  const form = makeMultipart(fields, { field: 'photo', filename: image.filename || 'image.jpg', mimeType: image.mimeType || 'image/jpeg', data: image.data });
-  const v = await requestJson(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', headers: { 'Content-Type': form.contentType } }, form.body);
+  throw new Error('Изображение не найдено.');
+}
+
+async function sendTelegramHtml(d, html) {
+  const token = getSecret(d, 'telegram_bot_token');
+  const chat = d.settings.telegramChatId;
+  if (!token || !chat) throw new Error('Telegram не настроен.');
+  const v = await requestJson(`https://api.telegram.org/bot${token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, { chat_id: chat, text: String(html || '').slice(0, 4096), parse_mode: 'HTML', disable_web_page_preview: false });
   if (!v.ok) throw new Error(JSON.stringify(v));
   return String(v.result && v.result.message_id || '');
 }
 
 async function sendTelegramPost(d, post) {
   const email = d.emails.find(e => e.id === post.email_id);
-  const links = email ? linksForPost(email) : [];
-  const content = stripEmailFooter(post.content);
-  const images = email ? publishableEmailImages(email) : [];
-  const buttonUrl = email ? extractAccessButton(email.body_html || '') : '';
-  if (!images.length) return sendTelegram(d, content);
+  if (!email) return sendTelegram(d, stripEmailFooter(post.content));
+  // The published text is the original email HTML, not Gemini's rewritten text.
+  const content = emailHtmlToTelegramHtml(email.body_html || email.body_text || post.content || '');
+  const images = publishableEmailImages(email);
+  const buttonUrl = extractAccessButton(email.body_html || '');
+  const [caption, remainder] = splitTelegramHtml(content, 1024);
+  if (!images.length) {
+    if (content.length <= 4096) return sendTelegramHtml(d, content);
+    let rest = content;
+    let first = '';
+    while (rest) { const parts = splitTelegramHtml(rest, 4096); const id = await sendTelegramHtml(d, parts[0]); if (!first) first = id; rest = parts[1]; }
+    return first;
+  }
   let firstMessage = '';
-  const ref = images[0];
   try {
-    let image = ref;
-    if (!ref.url) {
-      const data = await gmailAttachmentBuffer(d, email, ref);
-      if (data && data.length) image = { ...ref, data };
-    }
-    // Telegram photo captions are limited; keep the approved rich text together
-    // with the first image whenever it fits. The access button is attached to it.
-    if (image.data || image.url) {
-      const caption = content.length <= 1024 ? content : content.slice(0, 1021) + '…';
-      firstMessage = await sendTelegramPhoto(d, image, caption, buttonUrl);
-    }
+    firstMessage = await sendTelegramPhoto(d, images[0], caption, buttonUrl);
   } catch (_) {}
-  if (!firstMessage || content.length > 1024) {
-    const mid = await sendTelegram(d, content);
-    if (!firstMessage) firstMessage = mid;
+  if (!firstMessage) return sendTelegramHtml(d, content);
+  if (remainder) {
+    let rest = remainder;
+    while (rest) {
+      const parts = splitTelegramHtml(rest, 4096);
+      await sendTelegramHtml(d, parts[0]);
+      rest = parts[1];
+    }
   }
   return firstMessage;
 }
@@ -656,7 +784,7 @@ async function syncAndProcess() {
       for (const a of d.automations.filter(x => x.enabled !== false)) {
         if (!matchesAutomation(a, e.sender || '', e.subject || '', body)) continue;
         const made = await makePost(d, e.subject || '', e.sender || '', body, a.prompt);
-        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: stripEmailFooter(made.content), image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
+        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: stripEmailFooter(e.body_text || e.body_html || made.content), image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
         d.posts.unshift(post); generated++;
         if (a.mode === 'automatic') {
           try { const mid = await sendTelegramPost(d, post); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); } catch (err) { post.status = 'queued'; post.error = String(err.message || err); }
@@ -719,7 +847,7 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
   const made = await makePost(d, email.subject || '', email.sender || '', body, prompt);
   if (existing) {
     existing.title = made.title;
-    existing.content = stripEmailFooter(made.content);
+    existing.content = stripEmailFooter(email.body_text || email.body_html || made.content);
     existing.image_count = publishableEmailImages(email).length;
     existing.status = 'draft';
     delete existing.error;
@@ -731,7 +859,7 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
     id: crypto.randomUUID(),
     email_id: email.id,
     title: made.title,
-    content: stripEmailFooter(made.content),
+    content: stripEmailFooter(email.body_text || email.body_html || made.content),
     image_count: publishableEmailImages(email).length,
     status: 'draft',
     source: email.sender || 'Gmail',
