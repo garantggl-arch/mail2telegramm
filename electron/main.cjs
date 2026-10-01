@@ -513,7 +513,7 @@ async function sendTelegramPhoto(d, image, caption, buttonUrl) {
 async function sendTelegramPost(d, post) {
   const email = d.emails.find(e => e.id === post.email_id);
   const links = email ? linksForPost(email) : [];
-  const content = stripEmailFooter(appendOriginalLinks(post.content, links));
+  const content = stripEmailFooter(post.content);
   const images = email ? publishableEmailImages(email) : [];
   const buttonUrl = email ? extractAccessButton(email.body_html || '') : '';
   if (!images.length) return sendTelegram(d, content);
@@ -656,7 +656,7 @@ async function syncAndProcess() {
       for (const a of d.automations.filter(x => x.enabled !== false)) {
         if (!matchesAutomation(a, e.sender || '', e.subject || '', body)) continue;
         const made = await makePost(d, e.subject || '', e.sender || '', body, a.prompt);
-        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: appendOriginalLinks(made.content, linksForPost(e)), image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
+        const post = { id: crypto.randomUUID(), email_id: e.id, title: made.title, content: stripEmailFooter(made.content), image_count: publishableEmailImages(e).length, status: a.mode === 'automatic' ? 'queued' : 'draft', source: e.sender || 'Gmail', created_at: new Date().toISOString() };
         d.posts.unshift(post); generated++;
         if (a.mode === 'automatic') {
           try { const mid = await sendTelegramPost(d, post); post.status = 'published'; post.telegram_message_id = mid; post.published_at = new Date().toISOString(); } catch (err) { post.status = 'queued'; post.error = String(err.message || err); }
@@ -712,17 +712,26 @@ ipcMain.handle('create_post_from_email', async (_event, args = {}) => {
   const d = loadData();
   const email = d.emails.find(e => e.id === args.emailId);
   if (!email) throw new Error('Письмо не найдено');
-  const existing = d.posts.find(p => p.email_id === email.id);
-  if (existing) return existing.id;
+  const existing = d.posts.find(p => p.email_id === email.id && p.status !== 'published');
   const automation = d.automations.find(a => a.enabled !== false && matchesAutomation(a, email.sender || '', email.subject || '', email.body_text || email.body_html || ''));
   const prompt = automation ? automation.prompt : '';
   const body = stripEmailFooter(email.body_text || email.body_html || '');
   const made = await makePost(d, email.subject || '', email.sender || '', body, prompt);
+  if (existing) {
+    existing.title = made.title;
+    existing.content = stripEmailFooter(made.content);
+    existing.image_count = publishableEmailImages(email).length;
+    existing.status = 'draft';
+    delete existing.error;
+    existing.created_at = new Date().toISOString();
+    saveData(d);
+    return existing.id;
+  }
   const post = {
     id: crypto.randomUUID(),
     email_id: email.id,
     title: made.title,
-    content: appendOriginalLinks(made.content, linksForPost(email)),
+    content: stripEmailFooter(made.content),
     image_count: publishableEmailImages(email).length,
     status: 'draft',
     source: email.sender || 'Gmail',
