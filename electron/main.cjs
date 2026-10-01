@@ -139,7 +139,7 @@ function requestJson(url, options = {}, body = null) {
     const proxySocket = net.connect(proxy.port, proxy.host);
     let settled = false;
     const fail = err => { if (!settled) { settled = true; try { proxySocket.destroy(); } catch (_) {} reject(err); } };
-    proxySocket.setTimeout(30000, () => fail(new Error(`Прокси: тайм-аут подключения к ${proxy.host}:${proxy.port}`)));
+    proxySocket.setTimeout(90000, () => fail(new Error(`Прокси: тайм-аут подключения к ${proxy.host}:${proxy.port}`)));
     proxySocket.once('error', fail);
     proxySocket.once('connect', () => {
       let connectHeaders = `CONNECT ${u.hostname}:${u.port || 443} HTTP/1.1\r\nHost: ${u.hostname}:${u.port || 443}\r\nProxy-Connection: Keep-Alive\r\n`;
@@ -167,7 +167,7 @@ function requestJson(url, options = {}, body = null) {
       }
       const leftover = connectBuffer.slice(marker + 4);
       const secure = tls.connect({ socket: proxySocket, servername: u.hostname, rejectUnauthorized: options.rejectUnauthorized !== false });
-      secure.setTimeout(30000, () => { try { secure.destroy(new Error('HTTPS через прокси: тайм-аут')); } catch (_) {} });
+      secure.setTimeout(90000, () => { try { secure.destroy(new Error('HTTPS через прокси: тайм-аут')); } catch (_) {} });
       secure.once('error', fail);
       secure.once('secureConnect', () => {
         const requestPath = u.pathname + u.search;
@@ -510,10 +510,17 @@ async function makePost(d, subject, sender, body, customPrompt) {
   const prompt = customPrompt && customPrompt.trim() ? customPrompt : 'Сделай короткий пост для Telegram на русском языке по содержимому письма. Не выдумывай факты. Верни только JSON без markdown: {"title":"...","content":"..."}. Заголовок до 100 символов, текст до 3500 символов.';
   const input = `${prompt}\n\nОтправитель: ${sender}\nТема: ${subject}\n\nПисьмо:\n${body}`;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${encodeURIComponent(key)}`;
-  const v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, {
+  const geminiPayload = {
     contents: [{ role: 'user', parts: [{ text: input }] }],
     generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 4096, thinkingConfig: { thinkingLevel: 'low' } }
-  });
+  };
+  let v;
+  try {
+    v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, geminiPayload);
+  } catch (firstError) {
+    await new Promise(r => setTimeout(r, 1500));
+    v = await requestJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, geminiPayload);
+  }
   const text = (((v || {}).candidates || [])[0] || {}).content?.parts?.map(p => p.text || '').join('') || '';
   if (!text) throw new Error(`Gemini: не найден текст ответа: ${JSON.stringify(v).slice(0, 1500)}`);
   const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();

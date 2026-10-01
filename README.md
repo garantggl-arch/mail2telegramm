@@ -27,3 +27,7 @@ Win7 fix: electron-builder explicitly copies node_modules/electron/dist/ffmpeg.d
 
 
 Gemini model: gemini-3-flash-preview (Free Tier). Thinking level is set to low to avoid MAX_TOKENS truncation.
+
+
+## Proxy reliability fix
+The HTTPS CONNECT transport uses a longer 90-second timeout and no longer duplicates POST bodies through the proxy. Gemini requests retry once after a transient proxy failure.
